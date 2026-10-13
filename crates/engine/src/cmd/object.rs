@@ -531,6 +531,29 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             set_effects
         ),
+        cmd!(
+            "object.clearEffects",
+            "Clear Effects",
+            [],
+            None,
+            "{opaque?: bool (also Normal 100 %: the Effects panel's Clear All button), ids?} — removes every effect (the Effects panel's trash button)",
+            has_selection,
+            |s, p| {
+                let opaque = bool_or(p, "opaque", false);
+                set_flag(
+                    s,
+                    p,
+                    move |i| {
+                        i.effects = Default::default();
+                        if opaque {
+                            i.opacity = 1.0;
+                            i.blend = Default::default();
+                        }
+                    },
+                    false,
+                )
+            }
+        ),
         cmd!("object.feather", "Basic Feather", ["Object", "Effects"], None, "{width (0 = off), ids?}", has_selection, |s, p| {
             let w = f64_or(p, "width", 9.0).max(0.0);
             set_flag(s, p, move |i| i.effects.feather = w, false)
@@ -3506,5 +3529,29 @@ mod effects_command_tests {
             assert!(s.execute("object.effects", &p).is_err(), "{bad}");
         }
         assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+    }
+}
+
+#[cfg(test)]
+mod clear_effects_tests {
+    use serde_json::json;
+
+    #[test]
+    fn clear_effects_removes_them_and_opaque_resets_transparency() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+        let item = |s: &crate::Session| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().clone();
+        s.execute("object.effects", &json!({"ids": [id], "opacity": 0.5, "blend": "multiply", "effects": {"innerGlow": {"on": true}, "feather": 4}}))
+            .unwrap();
+        s.execute("object.clearEffects", &json!({"ids": [id]})).unwrap();
+        let it = item(&s);
+        assert!(!it.effects.any());
+        assert_eq!(it.opacity, 0.5, "the trash button keeps the transparency");
+        s.execute("object.clearEffects", &json!({"ids": [id], "opaque": true})).unwrap();
+        let it = item(&s);
+        assert_eq!((it.opacity, it.blend), (1.0, designcraft_color::BlendMode::Normal));
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(item(&s).opacity, 0.5);
     }
 }
