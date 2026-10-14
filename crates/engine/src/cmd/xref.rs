@@ -214,4 +214,23 @@ mod tests {
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(s.execute("xref.list", &json!({})).unwrap()[0]["text"], "(p. 3)");
     }
+
+    #[test]
+    fn cross_reference_into_a_story_with_a_running_header_composes() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"pages": 1, "facingPages": false})).unwrap();
+        let head = s.execute("frame.create", &json!({"rect": [72, 72, 400, 120], "content": "text", "text": "Chapter"})).unwrap()["story"].clone();
+        let body = s.execute("frame.create", &json!({"rect": [72, 200, 400, 300], "content": "text", "text": "See"})).unwrap()["story"].clone();
+        s.execute("text.select", &json!({"story": head, "anchor": 0, "focus": 0})).unwrap();
+        s.execute("variables.insert", &json!({"name": "Running Header"})).unwrap();
+        s.execute("text.select", &json!({"story": body, "anchor": 3, "focus": 3})).unwrap();
+        s.execute("xref.insert", &json!({"story": head, "para": 0})).unwrap();
+        // The cross-reference index and the running-header index used to build each other without end.
+        assert_eq!(s.execute("xref.list", &json!({})).unwrap()[0]["text"], "\u{201C}Chapter\u{201D} on page 1");
+        // The header shows the body's paragraph in front of its own text.
+        let d = s.doc().unwrap().doc.clone();
+        let cs = s.cache.get(&d, StoryId(head.as_u64().unwrap()), None);
+        let glyphs: usize = cs.frames[0].lines.iter().map(|l| l.glyphs.iter().filter(|g| g.visible && g.adv > 0.0).count()).sum();
+        assert_eq!(glyphs, "SeeChapter".len());
+    }
 }

@@ -139,6 +139,17 @@ pub fn current_slot(app: &DesignApp, layout: &CanvasLayout) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// The spread nearest the view centre and the centre in that spread's coordinates.
+pub fn view_centre(app: &DesignApp) -> Option<(SpreadRef, Point)> {
+    let st = app.session.active()?;
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let slot = layout.slots.get(current_slot(app, &layout)?)?;
+    let v = app.view()?;
+    let r = app.canvas_rect?;
+    let c = Point::new(v.origin.x + r.width() as f64 / 2.0 / v.zoom, v.origin.y + r.height() as f64 / 2.0 / v.zoom);
+    Some((slot.spread, slot.to_spread(c)))
+}
+
 /// Absolute page index under the view centre.
 pub fn current_page(app: &DesignApp) -> Option<usize> {
     let st = app.session.active()?;
@@ -338,6 +349,36 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
             app.session.cursor(xf.to_canvas(p), ui.input(|i| mods(i, false)), app.view_info())
         };
         ui.ctx().set_cursor_icon(cursor_icon(c));
+        draw_cursor_badge(&painter, p, c, &t);
+    }
+}
+
+/// The loaded text cursor's badge beside the system cursor: lines of text, a closed chain
+/// (a click threads) or a broken one (a click unthreads). Drawn in code.
+fn draw_cursor_badge(painter: &egui::Painter, p: Pos2, c: Cursor, t: &Tokens) {
+    if !matches!(c, Cursor::LoadedText | Cursor::ThreadLink | Cursor::Unthread) {
+        return;
+    }
+    let r = Rect::from_min_size(p + vec2(12.0, 12.0), vec2(20.0, 16.0));
+    painter.rect_filled(r, 3.0, t.measure_bg);
+    let ink = Stroke::new(1.5, t.measure_text);
+    let c0 = r.center();
+    match c {
+        Cursor::LoadedText => {
+            for (dy, w) in [(-4.0, 12.0), (0.0, 12.0), (4.0, 8.0)] {
+                painter.line_segment([pos2(c0.x - 6.0, c0.y + dy), pos2(c0.x - 6.0 + w, c0.y + dy)], ink);
+            }
+        }
+        _ => {
+            let gap = if c == Cursor::Unthread { 2.5 } else { -2.0 };
+            for side in [-1.0, 1.0] {
+                let link = Rect::from_center_size(pos2(c0.x + side * (3.5 + gap / 2.0), c0.y), vec2(9.0, 6.0));
+                painter.rect_stroke(link, 3.0, ink, StrokeKind::Middle);
+            }
+            if c == Cursor::Unthread {
+                painter.line_segment([pos2(c0.x + 2.0, c0.y - 6.0), pos2(c0.x - 2.0, c0.y + 6.0)], ink);
+            }
+        }
     }
 }
 
@@ -361,6 +402,8 @@ fn cursor_icon(c: Cursor) -> egui::CursorIcon {
         Cursor::ZoomOut => C::ZoomOut,
         Cursor::Eyedropper => C::Crosshair,
         Cursor::LoadedText | Cursor::LoadedGraphic => C::Copy,
+        Cursor::ThreadLink => C::Alias,
+        Cursor::Unthread => C::NoDrop,
         Cursor::NotAllowed => C::NotAllowed,
     }
 }
@@ -584,6 +627,17 @@ fn dashed(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, dash: f32, 
     painter.extend(egui::Shape::dashed_line(&[a, b], stroke, dash, gap));
 }
 
+/// The most baseline grid lines drawn on a page: one per point of the tallest page (216 in).
+const MAX_BASELINES: usize = 216 * 72;
+
+/// Baseline grid lines inside a page, measured from its top: `start + n * increment` for n >= 0 (the bottom
+/// edge is not a line). Lines above the page are skipped without walking them, however far up the start is.
+fn baseline_grid_lines(start: f64, increment: f64, height: f64) -> impl Iterator<Item = f64> {
+    let step = increment.max(1.0);
+    let first = if start < 0.0 { start.rem_euclid(step) } else { start };
+    (0..MAX_BASELINES).map(move |n| first + n as f64 * step).take_while(move |y| *y < height)
+}
+
 fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document, layout: &CanvasLayout, t: &Tokens) {
     let s = &doc.settings;
     for slot in &layout.slots {
@@ -612,13 +666,11 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
             // Baseline grid.
             if app.ui.baseline_grid && xf.zoom >= s.baseline_grid.view_threshold {
                 let g = &s.baseline_grid;
-                let mut y = g.start;
-                while y < p.height {
+                for y in baseline_grid_lines(g.start, g.increment, p.height) {
                     painter.line_segment(
                         [pt(Point::new(pr.x0, pr.y0 + y)), pt(Point::new(pr.x1, pr.y0 + y))],
                         Stroke::new(hair(painter), c32(g.color).gamma_multiply(0.8)),
                     );
-                    y += g.increment.max(1.0);
                 }
             }
             // Margins (magenta) and columns (violet).
@@ -810,7 +862,7 @@ fn draw_selection(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Docum
         union = Some(union.map_or(b, |u| u.union(b)));
         // Text frame ports.
         if let Content::Text(tf) = &it.content {
-            draw_ports(app, painter, xf, doc, layout, it, tf.story, a, color);
+            draw_ports(app, painter, xf, doc, layout, it, tf.story, color);
         }
         if let Content::Graphic(g) = &it.content
             && sel.content
@@ -903,7 +955,6 @@ fn draw_ports(
     layout: &CanvasLayout,
     it: &Item,
     sid: designcraft_doc::StoryId,
-    a: Affine,
     color: Color32,
 ) {
     let Some(story) = doc.story(sid) else { return };
@@ -911,14 +962,11 @@ fn draw_ports(
     let is_last = pos + 1 == story.frames.len();
     let cs = app.session.cache.get(doc, sid, None);
     let overset = is_last && cs.is_overset();
-    let s = 8.5;
-    let _ = layout;
-    let r = it.inner_bounds();
-    let m = a * it.xf;
+    let s = designcraft_tools::thread::PORT_SIZE_PX as f32;
     // In port on the left edge below the top-left corner; out port on the right edge above the
-    // bottom-right corner (screen-space offsets).
-    let inp = xf.to_screen(m * Point::new(r.x0, r.y0)) + vec2(0.0, 14.5);
-    let outp = xf.to_screen(m * Point::new(r.x1, r.y1)) - vec2(0.0, 12.0);
+    // bottom-right corner. The Selection tool hit-tests the same places.
+    let port = |out: bool| designcraft_tools::thread::port_center(doc, layout, it.id, out, xf.zoom).map(|c| xf.to_screen(c));
+    let (Some(inp), Some(outp)) = (port(false), port(true)) else { return };
     for (c, has_link, is_out) in [(inp, pos > 0, false), (outp, !is_last, true)] {
         let pr = Rect::from_center_size(c, vec2(s, s));
         painter.rect_filled(pr, 0.0, Color32::WHITE);
@@ -946,11 +994,12 @@ fn draw_text_selection(
     let range = ts.range();
     // Selected table cells: tint every selected cell.
     if let Some(sel) = cells.filter(|c| c.story == ts.story) {
+        let selected = doc.story(sel.story).and_then(|s| s.tables.get(&sel.table)).map(|t| t.selected_owners(sel.range)).unwrap_or_default();
         for ft in &cs.frames {
             let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame)) else { continue };
             let m = a * doc.text_xf(it);
             for t in ft.tables.iter().filter(|t| t.table == sel.table) {
-                for c in t.cells.iter().filter(|c| sel.range.contains(c.row, c.col)) {
+                for c in t.cells.iter().filter(|c| selected.binary_search(&(c.row, c.col)).is_ok()) {
                     let q = [
                         xf.to_screen(m * Point::new(c.rect.x0, c.rect.y0)),
                         xf.to_screen(m * Point::new(c.rect.x1, c.rect.y0)),
@@ -1011,6 +1060,15 @@ fn draw_text_selection(
             }
             let past = e == l.range.end && range.end > l.range.end;
             quads.extend(compose::highlight_quads(l, s, e, past));
+            // A selected drop cap is highlighted down to its baseline.
+            if let Some(dc) = l.drop_cap {
+                let sel = l.glyphs.iter().filter(|g| g.len > 0 && g.byte < dc.end && g.byte >= s && g.byte < e);
+                let (a, b) = sel.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), g| (a.min(g.x), b.max(g.x + g.adv)));
+                if a < b {
+                    let r = dc.rect;
+                    quads.push([Point::new(a, r.y0), Point::new(b, r.y0), Point::new(b, r.y1), Point::new(a, r.y1)]);
+                }
+            }
             for (gi, g) in l.glyphs.iter().enumerate() {
                 if g.visible && g.len > 0 && g.byte >= s && g.byte < e {
                     glyphs.push((li, gi));
@@ -1366,19 +1424,6 @@ fn fmt_tick(v: f64) -> String {
     if (v - r).abs() < 1e-6 { format!("{}", r as i64) } else { format!("{v:.1}") }
 }
 
-/// Presses in a row, this one included: each within egui's double-click delay and distance of the
-/// one before. Counted on the press, as text selection wants (egui counts releases, up to three).
-fn count_click(ui: &egui::Ui, id: egui::Id, at: Pos2, now: f64) -> u8 {
-    let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
-    let last: Option<(f64, Pos2, u8)> = ui.data(|d| d.get_temp(id));
-    let n = match last {
-        Some((t, p, n)) if now - t < delay && p.distance(at) < dist => n.saturating_add(1),
-        _ => 1,
-    };
-    ui.data_mut(|d| d.insert_temp(id, (now, at, n)));
-    n
-}
-
 fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
     let Some(v) = app.view().copied() else { return };
     let xf = Xf::new(rect, &v);
@@ -1421,15 +1466,19 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     let mut events: Vec<PointerEvent> = Vec::new();
     let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
     let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
+    let clicks_id = egui::Id::new(("canvas_clicks", app.pane));
     let (pressed, released, origin, latest, now) =
         ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.press_origin(), i.pointer.latest_pos(), i.time));
     if pressed
         && !space
         && let Some(o) = origin.filter(|o| (if xf.rot == 0 { rect.contains(*o) } else { resp.rect.contains(*o) }) && resp.hovered())
     {
-        let clicks = count_click(ui, egui::Id::new(("canvas_clicks", app.pane)), o, now);
-        let kind = if clicks == 2 { PointerKind::DoubleClick } else { PointerKind::Down };
-        events.push(PointerEvent { kind, pos: pos(o), mods: m, clicks });
+        // Count presses in a row here: egui reports double and triple clicks only on release and
+        // stops at three, but a press must know (word, line, paragraph, story).
+        let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
+        let n = press_count(ui.data(|d| d.get_temp(clicks_id)), o, now, delay, dist);
+        ui.data_mut(|d| d.insert_temp(clicks_id, Clicks { at: f64::NEG_INFINITY, pos: o, n }));
+        events.push(PointerEvent { kind: PointerKind::Down, pos: pos(o), mods: m, clicks: n });
         down = true;
     }
     if down
@@ -1437,7 +1486,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         && resp.drag_delta() != egui::Vec2::ZERO
         && let Some(p) = latest
     {
-        events.push(PointerEvent { kind: PointerKind::Drag, pos: pos(p), mods: m, clicks: 0 });
+        events.push(PointerEvent { kind: PointerKind::Drag, pos: pos(p), mods: m, clicks: 1 });
     }
     // Power Zoom: holding the Hand tool still for half a second turns the press into one.
     let hold_id = egui::Id::new(("canvas_hold", app.pane));
@@ -1447,7 +1496,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         let still = origin_pos.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
         if !fired && still && now - start >= 0.5 {
             let p = pos(latest.unwrap_or(rect.center()));
-            events.push(PointerEvent { kind: PointerKind::Up, pos: p, mods: m, clicks: 0 });
+            events.push(PointerEvent { kind: PointerKind::Up, pos: p, mods: m, clicks: 1 });
             events.push(PointerEvent { kind: PointerKind::Down, pos: p, mods: Mods { alt: true, ..m }, clicks: 1 });
             ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
         } else {
@@ -1460,11 +1509,15 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
     }
     if down && released {
+        if let Some(c) = ui.data(|d| d.get_temp::<Clicks>(clicks_id)) {
+            let dist = ui.ctx().options(|o| o.input_options.max_click_dist);
+            ui.data_mut(|d| d.insert_temp(clicks_id, release_clicks(c, latest.unwrap_or(c.pos), now, dist)));
+        }
         let p = latest.unwrap_or(rect.center());
-        events.push(PointerEvent { kind: PointerKind::Up, pos: pos(p), mods: m, clicks: 0 });
+        events.push(PointerEvent { kind: PointerKind::Up, pos: pos(p), mods: m, clicks: 1 });
         down = false;
     } else if !down && let Some(p) = resp.hover_pos() {
-        events.push(PointerEvent { kind: PointerKind::Move, pos: pos(p), mods: m, clicks: 0 });
+        events.push(PointerEvent { kind: PointerKind::Move, pos: pos(p), mods: m, clicks: 1 });
     }
     ui.data_mut(|d| d.insert_temp(down_id, down));
     for e in events {
@@ -1494,11 +1547,20 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
                 let _ = app.run(id, json!({"text": t}));
             }
             egui::Event::Copy | egui::Event::Cut if wants_text => {
+                // `run` puts the copied text on the system clipboard.
                 let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
-                if let Ok(r) = app.run(id, json!({}))
-                    && let Some(t) = r.get("text").and_then(serde_json::Value::as_str)
-                {
-                    ui.ctx().copy_text(t.to_string());
+                let _ = app.run(id, json!({}));
+            }
+            // Without a native menu bar the copy and paste keys arrive only as these events.
+            egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if !app.native_menu => {
+                let (id, params) = match e {
+                    egui::Event::Copy => ("edit.copy", serde_json::Value::Null),
+                    egui::Event::Cut => ("edit.cut", serde_json::Value::Null),
+                    egui::Event::Paste(t) => ("edit.paste", json!({"text": t})),
+                    _ => continue,
+                };
+                if crate::menus::enabled(app, id) {
+                    crate::menus::activate(app, id, &params);
                 }
             }
             egui::Event::Key { key, pressed: true, modifiers, .. } => {
@@ -1771,12 +1833,54 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
     true
 }
 
+/// Presses in a row on the canvas: the last press's count, and where and when it was released
+/// (`at` is −∞ while the button is down).
+#[derive(Clone, Copy, Debug)]
+struct Clicks {
+    at: f64,
+    pos: Pos2,
+    n: u8,
+}
+
+/// The count of a press at `pos` at time `now`: one more than the last press when it comes within
+/// the double-click delay of the last release and near where that release was, else 1.
+fn press_count(last: Option<Clicks>, pos: Pos2, now: f64, delay: f64, dist: f32) -> u8 {
+    match last {
+        Some(c) if now - c.at <= delay && (pos - c.pos).length() <= dist => c.n.saturating_add(1),
+        _ => 1,
+    }
+}
+
+/// The record a release at `pos` leaves: a release away from its press ended a drag, which is
+/// not a click, so the next press counts from one.
+fn release_clicks(press: Clicks, pos: Pos2, now: f64, dist: f32) -> Clicks {
+    let n = if (pos - press.pos).length() <= dist { press.n } else { 0 };
+    Clicks { at: now, pos, n }
+}
+
 #[cfg(test)]
 mod tests {
     use designcraft_geom::Unit;
     use egui_kittest::{Harness, kittest::Queryable};
 
     use super::*;
+
+    #[test]
+    fn a_press_after_a_drag_is_not_a_double_click() {
+        let (delay, dist) = (0.3, 6.0);
+        let press = |last, x: f32, now| press_count(last, pos2(x, 0.0), now, delay, dist);
+        // Click, click: a double click.
+        let n = press(None, 0.0, 0.0);
+        let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n }, pos2(0.0, 0.0), 0.1, dist);
+        assert_eq!(press(Some(up), 1.0, 0.2), 2);
+        // A drag from 0 to 100, then a fast press where it started or where it ended: a single click.
+        let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n: 1 }, pos2(100.0, 0.0), 0.1, dist);
+        assert_eq!(press(Some(up), 0.0, 0.2), 1);
+        assert_eq!(press(Some(up), 100.0, 0.2), 1);
+        // Too slow: a single click.
+        let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n: 1 }, pos2(0.0, 0.0), 0.1, dist);
+        assert_eq!(press(Some(up), 0.0, 1.0), 1);
+    }
 
     fn harness(app: DesignApp) -> Harness<'static, DesignApp> {
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
@@ -1803,6 +1907,79 @@ mod tests {
     fn units(h: &Harness<'_, DesignApp>) -> (Unit, Unit) {
         let s = &h.state().session.doc().unwrap().doc.settings;
         (s.horizontal_units, s.vertical_units)
+    }
+
+    #[test]
+    fn selected_merged_owners_paint_the_same_row_and_column_targets() {
+        for column in [true, false] {
+            for merged in [false, true] {
+                let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+                app.run("file.new", json!({"pages": 1})).unwrap();
+                app.run("frame.create", json!({"rect": [36, 36, 300, 300], "content": "text"})).unwrap();
+                app.run("table.insert", json!({"rows": 2, "cols": 2})).unwrap();
+                if merged {
+                    let range = if column { json!({"rows": [0, 0], "cols": [0, 1]}) } else { json!({"rows": [0, 1], "cols": [0, 0]}) };
+                    app.run("table.select", range).unwrap();
+                    app.run("table.merge", json!({})).unwrap();
+                }
+                app.run("table.select", json!({"rows": [1, 1], "cols": [1, 1]})).unwrap();
+                app.run(if column { "table.selectColumn" } else { "table.selectRow" }, json!({})).unwrap();
+                let st = app.session.doc().unwrap();
+                let selection = st.selection.clone();
+                let ts = selection.text.unwrap();
+                let selected = selection.cells.unwrap();
+                assert_eq!(
+                    selected.range,
+                    if column { designcraft_doc::CellRange::new(0, 1, 1, 1) } else { designcraft_doc::CellRange::new(1, 0, 1, 1) }
+                );
+                let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+                let cs = app.session.cache.get(&st.doc, ts.story, None);
+                let ft = &cs.frames[0];
+                let table = ft.tables.iter().find(|t| t.table == selected.table).unwrap();
+                let (a, _) = item_canvas_xf(&st.doc, &layout, ft.frame).unwrap();
+                let m = a * st.doc.text_xf(st.doc.item(ft.frame).unwrap());
+                let xf = Xf { min: pos2(0.0, 0.0), origin: Point::new(0.0, 0.0), zoom: 1.0, rot: 0, pivot: pos2(0.0, 0.0) };
+                let owners = if merged {
+                    [(0, 0), (1, 1)]
+                } else if column {
+                    [(0, 1), (1, 1)]
+                } else {
+                    [(1, 0), (1, 1)]
+                };
+                let expected: Vec<_> = owners
+                    .into_iter()
+                    .map(|(r, c)| {
+                        let rect = table.cells.iter().find(|cell| cell.row == r && cell.col == c).unwrap().rect;
+                        vec![
+                            xf.to_screen(m * Point::new(rect.x0, rect.y0)),
+                            xf.to_screen(m * Point::new(rect.x1, rect.y0)),
+                            xf.to_screen(m * Point::new(rect.x1, rect.y1)),
+                            xf.to_screen(m * Point::new(rect.x0, rect.y1)),
+                        ]
+                    })
+                    .collect();
+                let ctx = egui::Context::default();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    draw_text_selection(&app, ui.painter(), &xf, &st.doc, &layout, ts, Some(selected));
+                });
+                output.textures_delta.clear();
+                let tint = Color32::from_rgba_unmultiplied(80, 140, 255, 90);
+                let painted: Vec<_> = output
+                    .shapes
+                    .into_iter()
+                    .filter_map(|s| match s.shape {
+                        egui::Shape::Path(path) if path.fill == tint => {
+                            assert!(path.closed);
+                            assert_eq!(path.stroke, egui::epaint::PathStroke::NONE);
+                            Some(path.points)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(painted, expected, "only the two touched owners are tinted; column={column}, merged={merged}");
+                assert_eq!(app.session.doc().unwrap().selection, selection);
+            }
+        }
     }
 
     #[test]
@@ -1881,10 +2058,10 @@ mod tests {
     }
 
     #[test]
-    fn clicks_in_a_row_select_word_sentence_paragraph_and_story() {
+    fn clicks_in_a_row_select_word_line_paragraph_with_return_and_story() {
         let text = "One two. Three four! Five six.\nSecond para here.";
         let (mut h, id) = typing(text);
-        // Inside "Three", the second sentence: its start is not the paragraph's.
+        // Inside "Three": double-click selects the word, then line and paragraph with return.
         let p = screen_at(&mut h, id, 10..14);
         h.hover_at(p);
         h.step();
@@ -1894,7 +2071,7 @@ mod tests {
             let r = selected(&h);
             got.push(text[r].to_string());
         }
-        assert_eq!(got[1..], ["Three", "Three four! ", "One two. Three four! Five six.", text], "{got:?}");
+        assert_eq!(got[1..], ["Three", "One two. Three four! Five six.", "One two. Three four! Five six.\n", text], "{got:?}");
         assert!(got[0].is_empty(), "one click places the caret: {got:?}");
     }
 
@@ -1917,5 +2094,19 @@ mod tests {
         let Some(rect) = h.state().canvas_rect else { return };
         right_click(&mut h, pos2(rect.center().x, rect.min.y - RULER / 2.0));
         assert!(h.query_by_label("   Points").is_none());
+    }
+
+    #[test]
+    fn baseline_grid_lines_are_the_ones_on_the_page() {
+        // A start far above the page used to be walked line by line, without end.
+        for start in [-1e9, -1e17] {
+            let mut far = baseline_grid_lines(start, 12.0, 792.0);
+            assert_eq!((far.next(), far.count()), (Some(8.0), 65));
+        }
+        let lines = |start, increment, height| baseline_grid_lines(start, increment, height).collect::<Vec<_>>();
+        assert_eq!(lines(36.0, 12.0, 72.0), [36.0, 48.0, 60.0], "the bottom edge is not a line");
+        assert_eq!(lines(-30.0, 12.0, 30.0), [6.0, 18.0], "a start above the page keeps its rhythm");
+        assert_eq!(lines(f64::NAN, 12.0, 792.0), [0.0; 0]);
+        assert_eq!(baseline_grid_lines(0.0, 12.0, f64::INFINITY).count(), MAX_BASELINES);
     }
 }

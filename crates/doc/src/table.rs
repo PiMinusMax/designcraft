@@ -444,6 +444,25 @@ impl Table {
         v
     }
 
+    /// Owning cells touched by the range, once each in row-major order. Bounds are clipped
+    /// to the grid; resolving covered positions does not expand the selection rectangle.
+    pub fn selected_owners(&self, range: CellRange) -> Vec<(usize, usize)> {
+        let (nr, nc) = (self.nrows(), self.ncols());
+        if range.r0 >= nr || range.c0 >= nc || range.r0 > range.r1 || range.c0 > range.c1 {
+            return Vec::new();
+        }
+        let owners = self.owners();
+        let mut selected = std::collections::BTreeSet::new();
+        for r in range.r0..=range.r1.min(nr - 1) {
+            for c in range.c0..=range.c1.min(nc - 1) {
+                if let Some(&owner) = owners.get(r * nc + c) {
+                    selected.insert(owner);
+                }
+            }
+        }
+        selected.into_iter().collect()
+    }
+
     /// The owning (top-left) cell address of grid position (r, c).
     pub fn owner(&self, r: usize, c: usize) -> (usize, usize) {
         self.owners().get(r * self.ncols() + c).copied().unwrap_or((r, c))
@@ -1134,6 +1153,35 @@ mod tests {
 
     fn story(t: &str) -> Story {
         Story::with_text(StoryId(1), t, ParaFormat::default())
+    }
+
+    #[test]
+    fn selected_owners_include_covered_cells_without_expanding_range() {
+        for column in [true, false] {
+            let mut t = Table::new(1, 2, 2, 0, 0, 120.0);
+            let range = if column { CellRange::new(0, 1, 1, 1) } else { CellRange::new(1, 0, 1, 1) };
+            assert_eq!(t.selected_owners(range), if column { vec![(0, 1), (1, 1)] } else { vec![(1, 0), (1, 1)] });
+            t.merge(if column { CellRange::new(0, 0, 0, 1) } else { CellRange::new(0, 0, 1, 0) }).unwrap();
+            assert_eq!(t.selected_owners(range), vec![(0, 0), (1, 1)]);
+        }
+    }
+
+    #[test]
+    fn selected_owners_are_bounded_sorted_and_unique() {
+        let mut t = Table::new(1, 3, 3, 0, 0, 180.0);
+        t.merge(CellRange::new(0, 0, 1, 1)).unwrap();
+        assert_eq!(t.selected_owners(CellRange::new(1, 1, usize::MAX, usize::MAX)), vec![(0, 0), (1, 2), (2, 1), (2, 2)]);
+        assert_eq!(t.selected_owners(CellRange::new(0, 0, 1, 1)), vec![(0, 0)], "covered positions do not duplicate an owner");
+        assert!(t.selected_owners(CellRange::new(3, 0, usize::MAX, usize::MAX)).is_empty());
+        assert!(t.selected_owners(CellRange::new(0, 3, usize::MAX, usize::MAX)).is_empty());
+        assert!(t.selected_owners(CellRange { r0: 1, c0: 0, r1: 0, c1: 1 }).is_empty());
+        t.rows.clear();
+        t.cells.clear();
+        assert!(t.selected_owners(CellRange::cell(0, 0)).is_empty());
+
+        let mut right = Table::new(2, 2, 2, 0, 0, 120.0);
+        right.merge(CellRange::new(0, 1, 1, 1)).unwrap();
+        assert_eq!(right.selected_owners(CellRange::new(1, 0, 1, 1)), vec![(0, 1), (1, 0)], "owner order, not encounter order");
     }
 
     #[test]

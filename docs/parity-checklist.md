@@ -16,12 +16,12 @@ of in-scope menu items (75% against the documented menu tree) (see [target-app-p
 bound.
 
 <!-- SUMMARY -->
-**Weighted breadth parity: 99%** over 275 features.
+**Weighted breadth parity: 99%** over 276 features.
 
 | Priority | Features | Done | Partial | Missing | Parity |
 |---|---|---|---|---|---|
 | P0 | 102 | 100 | 2 | 0 | 99% |
-| P1 | 97 | 97 | 0 | 0 | 100% |
+| P1 | 98 | 98 | 0 | 0 | 100% |
 | P2 | 76 | 72 | 4 | 0 | 97% |
 
 | Area | Parity |
@@ -235,6 +235,7 @@ Open P0 items: Vector/page formats (PDF/AI/SVG/EPS place), Export to PDF (print)
 | Typography | Single-line Composer | P0 | D |
 | Typography | Tabs, leaders, right-indent tab | P0 | D |
 | Typography | Nested / line / GREP styles | P1 | D |
+| Typography | Drop caps | P1 | D |
 | Typography | Paragraph rules | P1 | D |
 | Typography | Paragraph borders & shading | P1 | D |
 | Typography | Balance ragged lines | P1 | D |

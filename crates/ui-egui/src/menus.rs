@@ -93,6 +93,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("view.screenMode", "Screen Mode", None, "{mode: normal|preview|bleed|slug|presentation}"),
     ("view.togglePreview", "Toggle Normal/Preview", Some("W"), "{}"),
     (
+        "app.formattingAffectsText",
+        "Formatting Affects Text",
+        Some("J"),
+        "{on?: bool} — with text frames selected, colours go to their text (on) or the frames (off); toggles without `on`",
+    ),
+    (
         "color.defaultFillStroke",
         "Default Fill and Stroke",
         Some("D"),
@@ -1331,6 +1337,10 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
                 "zone": ui.snap_zone,
             }))
         }
+        "app.formattingAffectsText" => {
+            app.ui.formatting_affects_text = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.formatting_affects_text);
+            Ok(json!({"on": app.ui.formatting_affects_text}))
+        }
         "window.richBlack" => {
             app.ui.rich_black = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.rich_black);
             app.canvas.shown = None;
@@ -2501,6 +2511,35 @@ mod tests {
     }
 
     #[test]
+    fn formatting_affects_text_sends_swatches_to_the_text() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        for (name, color) in [("Cyan", "#00ffff"), ("Magenta", "#ff00ff")] {
+            let created = app.run("swatch.create", json!({"name": name, "color": color})).unwrap();
+            assert_eq!(created["name"], name);
+        }
+        let r = app.run("frame.create", json!({"rect": [72, 72, 300, 200], "content": "text", "text": "words", "caret": false})).unwrap();
+        let (fid, sid) = (r["id"].as_u64().unwrap(), r["story"].as_u64().unwrap());
+        app.run("selection.set", json!({"ids": [fid]})).unwrap();
+        let text_fill = |app: &crate::DesignApp| {
+            let st = app.session.active().unwrap().doc.story(designcraft_doc::StoryId(sid)).unwrap().clone();
+            st.char_format_at(2).over.fill.clone()
+        };
+        let frame_fill = |app: &crate::DesignApp| app.session.active().unwrap().doc.item(designcraft_doc::ItemId(fid)).unwrap().fill.swatch.clone();
+        assert!(!crate::panels::colors_affect_text(&app));
+        crate::panels::apply_swatch(&mut app, false, "Cyan", None).unwrap();
+        assert_eq!(frame_fill(&app), "Cyan");
+        assert_eq!(text_fill(&app), None);
+        let r = run_ui(&mut app, "app.formattingAffectsText", &json!({})).unwrap().unwrap();
+        assert_eq!(r["on"], true, "toggles on");
+        assert!(crate::panels::colors_affect_text(&app));
+        crate::panels::apply_swatch(&mut app, false, "Magenta", Some(0.5)).unwrap();
+        assert_eq!(frame_fill(&app), "Cyan", "the frame is left alone");
+        assert_eq!(text_fill(&app).as_deref(), Some("Magenta"));
+        assert_eq!(crate::panels::color_target(&mut app).map(|t| (t.0, t.1)), Some(("Magenta".to_string(), 0.5)));
+    }
+
+    #[test]
     fn transform_menu_items_open_their_dialogs() {
         for id in ["transform.move", "transform.scale", "transform.rotate", "transform.shear"] {
             let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
@@ -3143,6 +3182,117 @@ mod tests {
         let with_sc = first.clone().find(|it| it.shortcut.is_some()).expect("a row with a shortcut");
         let (a, b) = (label_x(&plain.label).expect("plain row drawn"), label_x(&with_sc.label).expect("shortcut row drawn"));
         assert!((a - b).abs() < 0.5, "{:?} at x {a}, {:?} at x {b}", plain.label, with_sc.label);
+    }
+
+    #[test]
+    fn copy_and_paste_keys_work_for_objects_without_a_native_menu() {
+        // Without a native menu the paste key arrives only as a paste event, which needs text on
+        // the system clipboard (#164, #185).
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", &json!({})).unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut crate::DesignApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+            out.platform_output.commands
+        };
+        let count = |app: &crate::DesignApp| app.session.active().unwrap().doc.spreads[0].items.len();
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        let id = app.session.execute("frame.create", &json!({"rect": [72, 72, 200, 160]})).unwrap()["id"].clone();
+        app.session.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        let n = count(&app);
+        let copied = frame(&mut app, vec![egui::Event::Copy])
+            .into_iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t),
+                _ => None,
+            })
+            .expect("copying objects puts text on the system clipboard");
+        assert!(!copied.is_empty());
+        frame(&mut app, vec![egui::Event::Paste(copied.clone())]);
+        assert_eq!(count(&app), n + 1, "the paste key pastes the copied rectangle");
+
+        // Pasting into text anchors the copied object; the clipboard placeholder isn't typed.
+        let r = app.session.execute("frame.create", &json!({"rect": [72, 300, 400, 400], "content": "text", "text": "Hello"})).unwrap();
+        let story = r["story"].as_u64().unwrap();
+        app.session.execute("tool.select", &json!({"tool": "type"})).unwrap();
+        app.session.execute("text.select", &json!({"story": story, "anchor": 5, "focus": 5})).unwrap();
+        frame(&mut app, vec![egui::Event::Paste(copied.clone())]);
+        // Shift pastes without formatting.
+        frame(&mut app, vec![egui::Event::ModifiersChanged(egui::Modifiers::SHIFT), egui::Event::Paste(copied)]);
+        let text = app.session.active().unwrap().doc.story(designcraft_doc::StoryId(story)).unwrap().text.clone();
+        assert!(text.starts_with("Hello") && !text.contains('\u{FFFC}'), "{text:?}");
+        assert!(text.contains(designcraft_doc::OBJECT_MARK), "{text:?}");
+    }
+
+    #[test]
+    fn paste_with_no_insertion_point_makes_a_text_frame_from_other_apps_text() {
+        // #518: text copied in another app pastes as a new, selected text frame; the text an
+        // object copy stands for still pastes the objects. One paste each way, with and without
+        // a native menu.
+        let selected_text = |app: &crate::DesignApp| {
+            let d = app.session.active().unwrap();
+            let it = d.doc.item(*d.selection.items.first()?)?;
+            Some(d.doc.story(it.text_frame()?.story)?.text.clone())
+        };
+        let ctx = egui::Context::default();
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", &json!({})).unwrap();
+        native_frame(&mut app, &ctx, vec![], None);
+        native_frame(&mut app, &ctx, vec![], None);
+        // The paste keys without a native menu: a paste event.
+        native_frame(&mut app, &ctx, vec![egui::Event::Paste("From elsewhere".into())], None);
+        assert_eq!(document_items(&app), (1, 1), "pasted once");
+        assert_eq!(selected_text(&app).as_deref(), Some("From elsewhere"));
+        let id = app.session.execute("frame.create", &json!({"rect": [72, 72, 200, 160]})).unwrap()["id"].clone();
+        app.session.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        let copied = native_frame(&mut app, &ctx, vec![egui::Event::Copy], None)
+            .platform_output
+            .commands
+            .into_iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t),
+                _ => None,
+            })
+            .expect("copying objects puts text on the system clipboard");
+        native_frame(&mut app, &ctx, vec![egui::Event::Paste(copied)], None);
+        assert_eq!(document_items(&app), (3, 1));
+        assert_eq!(selected_text(&app), None, "the copied rectangle, not a text frame");
+
+        // A native menu: Paste reads the system clipboard.
+        let clip = std::rc::Rc::new(std::cell::RefCell::new(Some("Menu text".to_string())));
+        let read = clip.clone();
+        let services = crate::Services { clipboard_text: Some(Box::new(move || read.borrow().clone())), ..Default::default() };
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), services);
+        app.native_menu = true;
+        app.session.execute("file.new", &json!({})).unwrap();
+        native_frame(&mut app, &ctx, vec![], None);
+        native_frame(&mut app, &ctx, vec![], None);
+        native_frame(&mut app, &ctx, vec![], Some("edit.paste"));
+        native_frame(&mut app, &ctx, vec![], None);
+        assert_eq!(document_items(&app), (1, 1), "pasted once");
+        assert_eq!(selected_text(&app).as_deref(), Some("Menu text"));
+        // Objects copied since that text was copied paste as objects.
+        let id = app.session.execute("frame.create", &json!({"rect": [72, 72, 200, 160]})).unwrap()["id"].clone();
+        app.session.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        native_frame(&mut app, &ctx, vec![], Some("edit.copy"));
+        native_frame(&mut app, &ctx, vec![], Some("edit.paste"));
+        assert_eq!(document_items(&app), (3, 1));
+        assert_eq!(selected_text(&app), None, "the copied rectangle, not a text frame");
+        // Newer text from another app wins.
+        *clip.borrow_mut() = Some("Newer".into());
+        native_frame(&mut app, &ctx, vec![], Some("edit.paste"));
+        assert_eq!(document_items(&app), (4, 1));
+        assert_eq!(selected_text(&app).as_deref(), Some("Newer"));
     }
 
     #[test]

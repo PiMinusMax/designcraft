@@ -1915,7 +1915,7 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
         }
         "colorPicker" => {
             let hex = d.s("hex");
-            app.run("object.color", json!({"color": hex, "target": d.s("target")}))
+            app.run("object.color", json!({"color": hex, "target": d.s("target"), "text": d.b("text")}))
         }
         "layerOptions" => {
             let hidden: Vec<Value> = d.fields.get("layers").and_then(Value::as_array).map(|a| a.iter().filter(|l| l["visible"] == false).map(|l| l["name"].clone()).collect()).unwrap_or_default();
@@ -2016,7 +2016,10 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 let words: Vec<String> = d.s("userWords").lines().map(str::to_string).collect();
                 app.run("spelling.setWords", json!({"words": words}))?;
             }
-            app.ui.story_editor_size = d.n("storyEditorSize").unwrap_or(14.0) as f32;
+            // The slider's range. A size that isn't finite is saved as `null`, and ui.json then fails to load.
+            if let Some(size) = d.n("storyEditorSize").filter(|v| v.is_finite()) {
+                app.ui.story_editor_size = size.clamp(8.0, 36.0) as f32;
+            }
             // Highlight options change the screen view only.
             app.canvas.shown = None;
             let view = match d.s("displayQuality").as_str() {
@@ -2320,6 +2323,41 @@ fn paragraph_style_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialo
                 });
             }
             "nested" => {
+                crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Drop Caps")).font(semibold(12.0)));
+                egui::Grid::new("psdc").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    for (label, key, max) in [
+                        ("Lines:", "dropCapLines", designcraft_compose::MAX_DROP_CAP_LINES),
+                        ("Characters:", "dropCapChars", designcraft_compose::MAX_DROP_CAP_CHARS),
+                    ] {
+                        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, label));
+                        let v = cur(d, &format!("p.{key}"), &pv[key]).as_f64();
+                        if let Some(n) = crate::widgets::number(ui, &format!("ps{key}"), v, "", 60.0, 0) {
+                            d.fields.insert(format!("p.{key}"), json!((n.max(0.0) as u64).min(max as u64)));
+                        }
+                        ui.end_row();
+                    }
+                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Character Style:"));
+                    let style = cur(d, "p.dropCapStyle", &pv["dropCapStyle"]).as_str().unwrap_or("").to_string();
+                    let style = if style.is_empty() { designcraft_doc::NO_CHAR_STYLE.to_string() } else { style };
+                    egui::ComboBox::from_id_salt("ps_dropcap_style")
+                        .selected_text(crate::rtl::widget(ui, crate::i18n::style_name(&app.ui.language, &style)))
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            for c in &cnames {
+                                if ui.selectable_label(*c == style, crate::rtl::widget(ui, crate::i18n::style_name(&app.ui.language, c))).clicked() {
+                                    d.fields.insert("p.dropCapStyle".into(), json!(c));
+                                }
+                            }
+                        });
+                    ui.end_row();
+                });
+                for (label, key) in [("Align Left Edge", "dropCapAlignLeft"), ("Scale for Descenders", "dropCapScaleDescenders")] {
+                    let mut on = cur(d, &format!("p.{key}"), &pv[key]).as_bool().unwrap_or(false);
+                    if ui.checkbox(&mut on, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).changed() {
+                        d.fields.insert(format!("p.{key}"), json!(on));
+                    }
+                }
+                ui.add_space(8.0);
                 crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Nested Styles")).font(semibold(12.0)));
                 let mut list: Vec<Value> = cur(d, "p.nestedStyles", &pv["nestedStyles"]).as_array().cloned().unwrap_or_default();
                 let mut changed = false;
@@ -2375,9 +2413,19 @@ fn paragraph_style_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialo
                             ))
                             .width(100.0)
                             .show_ui(ui, |ui| {
-                                for k in
-                                    ["sentences", "words", "characters", "letters", "digits", "tab", "forcedLineBreak", "emSpace", "enSpace", "chars"]
-                                {
+                                for k in [
+                                    "sentences",
+                                    "words",
+                                    "characters",
+                                    "letters",
+                                    "digits",
+                                    "tab",
+                                    "forcedLineBreak",
+                                    "emSpace",
+                                    "enSpace",
+                                    "dropcap",
+                                    "chars",
+                                ] {
                                     if ui.selectable_label(k == kind, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, k))).clicked() {
                                         ns["until"] = if k == "chars" { json!({"kind": "chars", "chars": ":"}) } else { json!({"kind": k}) };
                                         changed = true;
@@ -3360,7 +3408,14 @@ fn footnote_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
                 ui,
                 d,
                 "firstBaseline",
-                &[("ascent", "Ascent"), ("capHeight", "Cap Height"), ("leading", "Leading"), ("xHeight", "x Height"), ("fixed", "Fixed")],
+                &[
+                    ("ascent", "Ascent"),
+                    ("capHeight", "Cap Height"),
+                    ("leading", "Leading"),
+                    ("xHeight", "x Height"),
+                    ("emboxHeight", "Em Box Height"),
+                    ("fixed", "Fixed"),
+                ],
             );
             ui.end_row();
             crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Min:"));
@@ -4101,6 +4156,22 @@ mod tests {
         }
         click_dialog(&mut app, &ctx, screen, visible_label(&labels, screen, option).center());
         assert!(app.ui.dialog.as_ref().unwrap().b("absolutePageNumbers"));
+    }
+
+    #[test]
+    fn preferences_ok_saves_a_story_editor_size_that_loads_back() {
+        // `ui.dialog.set` takes any value; a size that isn't finite is saved as `null`.
+        let sizes = [(json!("nan"), 20.0), (json!("inf"), 20.0), (json!(null), 20.0), (json!(1e39), 36.0), (json!(3), 8.0), (json!(11), 11.0)];
+        for (size, want) in sizes {
+            let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+            app.run("file.new", json!({})).unwrap();
+            app.ui.story_editor_size = 20.0;
+            app.run("app.preferences", json!({})).unwrap();
+            app.ui.dialog.as_mut().unwrap().fields.insert("storyEditorSize".into(), size);
+            confirm(&mut app).unwrap();
+            let saved = serde_json::to_vec(&app.ui).unwrap();
+            assert_eq!(crate::UiState::from_preferences_json(&saved).unwrap().story_editor_size, want);
+        }
     }
 
     #[test]

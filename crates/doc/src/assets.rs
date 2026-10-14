@@ -5,6 +5,7 @@
 //! shown); each placement's frame data (transform, crop, fitting) lives on its [`Graphic`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::BuildHasher;
 use std::sync::Arc;
 
 use crate::story::Story;
@@ -246,10 +247,19 @@ impl Document {
         if !self.asset_refs(&mut |_| {}) {
             return 0;
         }
-        let mut reps: HashMap<(usize, &str, u32), Vec<&Arc<Asset>>> = HashMap::new();
+        let fingerprint = std::collections::hash_map::RandomState::new();
+        let mut hashes = HashMap::new();
+        let mut reps: HashMap<_, Vec<&Arc<Asset>>> = HashMap::new();
         let mut map = HashMap::new();
         for a in self.assets.values() {
-            let bucket = reps.entry((a.data.len(), a.mime.as_str(), a.page)).or_default();
+            // Empty, unlinked assets never compare equal. Don't build a quadratic bucket
+            // of them, and hash a shared immutable buffer only once per compaction.
+            if a.data.is_empty() && a.link.is_none() {
+                continue;
+            }
+            let hash = *hashes.entry(Arc::as_ptr(&a.data)).or_insert_with(|| fingerprint.hash_one(a.data.as_slice()));
+            let bucket = reps.entry((hash, a.mime.as_str(), a.page, a.link.as_deref())).or_default();
+            // A fingerprint only selects candidates; equality still checks the actual file.
             match bucket.iter().find(|r| r.same_file(a)) {
                 Some(r) => {
                     map.insert(a.id, r.id);
@@ -278,6 +288,56 @@ mod tests {
 
     fn asset(id: u64, data: &[u8]) -> Asset {
         Asset { id: AssetId(id), name: "p.png".into(), mime: "image/png".into(), link: None, data: Arc::new(data.to_vec()), pixels: None, page: 0 }
+    }
+
+    #[test]
+    fn equal_size_assets_keep_distinct_contents_and_merge_exact_copies() {
+        let mut d = Document::new(&Default::default());
+        for id in 1..=256u64 {
+            let mut bytes = vec![42; 1024];
+            bytes[1016..].copy_from_slice(&id.to_le_bytes());
+            d.assets.insert(AssetId(id), Arc::new(asset(id, &bytes)));
+            d.assets.insert(AssetId(id + 256), Arc::new(asset(id + 256, &bytes)));
+        }
+        assert_eq!(d.merge_duplicate_assets(), 256);
+        assert_eq!(d.assets.len(), 256);
+        for id in 1..=256u64 {
+            assert_eq!(d.assets[&AssetId(id)].data[1016..], id.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn compaction_preserves_asset_identity_and_missing_data_rules() {
+        let mut d = Document::new(&Default::default());
+        let mut cases = vec![asset(1, b"same"), asset(2, b"same"), asset(3, b"same"), asset(4, b"same")];
+        cases[1].mime = "application/pdf".into();
+        cases[2].page = 1;
+        cases[3].link = Some("/linked.png".into());
+        cases.extend([asset(5, b""), asset(6, b""), asset(7, b""), asset(8, b"")]);
+        cases[6].link = Some("/missing.png".into());
+        cases[7].link = Some("/missing.png".into());
+        for a in cases {
+            d.assets.insert(a.id, Arc::new(a));
+        }
+        assert_eq!(d.merge_duplicate_assets(), 1);
+        assert_eq!(d.assets.keys().copied().collect::<Vec<_>>(), (1..=7).map(AssetId).collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[ignore = "manual bounded timing comparison; no timing assertion"]
+    fn equal_size_assets_timing() {
+        for count in [500, 1000, 2000] {
+            let mut d = Document::new(&Default::default());
+            for id in 1..=count as u64 {
+                let mut bytes = vec![42; 8192];
+                bytes[8184..].copy_from_slice(&id.to_le_bytes());
+                d.assets.insert(AssetId(id), Arc::new(asset(id, &bytes)));
+            }
+            let start = std::time::Instant::now();
+            assert_eq!(d.merge_duplicate_assets(), 0);
+            eprintln!("{count} distinct 8 KiB assets: {:?}", start.elapsed());
+        }
     }
 
     fn graphic_item(id: u64, asset: u64, crop: f64) -> Item {

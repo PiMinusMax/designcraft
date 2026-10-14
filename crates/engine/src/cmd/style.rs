@@ -180,7 +180,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Color",
             [],
             None,
-            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, text?: bool, ids?} — an unnamed colour on the selected text or objects; `text` also targets the text of selected frames",
+            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, text?: bool, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection; `text`: on the selected text, or the text of the selected frames (Formatting Affects Text)",
             has_text_or_selection,
             apply_color
         ),
@@ -638,10 +638,9 @@ fn create_char(s: &mut Session, p: &Value) -> Result<Value> {
         && let Some(target) = super::text::format_targets_pub(s).first()
     {
         let st = s.doc()?;
-        let story = st.doc.text_story(target.story, target.cell).ok_or(designcraft_doc::DocError::NoStory(target.story))?;
         // Match paragraph fromSelection's first-character/caret policy, but keep paragraph
         // attributes inherited instead of freezing the fully resolved character properties.
-        let format = if target.range.is_empty() { story.char_format_at(target.range.start) } else { story.format_after(target.range.start) };
+        let format = super::text::effective_char_format(s, target)?;
         let mut captured = st.doc.styles.char_style_attrs(&format.style);
         captured.merge(&format.over);
         // Replay the explicit fields so null clears a captured value rather than looking absent.
@@ -986,47 +985,30 @@ fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
     let named = p.get("ids").is_some() || p.get("id").is_some();
     let text = !named
         && (p.get("text").and_then(Value::as_bool).unwrap_or(false) || s.doc()?.selection.text.is_some() || s.doc()?.selection.cells.is_some());
-    if text {
-        let targets = super::text::format_targets(s);
-        // A caret in existing text has no editable range. Refuse it before creating a swatch
-        // or history; an empty story has a format run that the next insertion inherits.
-        if !targets
-            .iter()
-            .any(|t| !t.range.is_empty() || s.active().is_some_and(|d| d.doc.text_story(t.story, t.cell).is_some_and(|st| st.is_empty())))
-        {
-            return Err(bad("object.color", "select the text to colour"));
-        }
-        return s.edit(|d, _| {
-            let name = color_swatch(d, color);
-            for t in &targets {
-                let Some(story) = d.text_story_mut(t.story, t.cell) else { continue };
-                let set = |f: &mut designcraft_doc::CharFormat| {
-                    if stroke {
-                        (f.over.stroke, f.over.stroke_tint) = (Some(name.clone()), Some(1.0));
-                    } else {
-                        (f.over.fill, f.over.fill_tint) = (Some(name.clone()), Some(1.0));
-                    }
-                };
-                if t.range.is_empty() {
-                    if story.is_empty()
-                        && let Some(run) = story.chars.first_mut()
-                    {
-                        set(&mut run.format);
-                        story.rev = story.rev.wrapping_add(1);
-                    }
-                } else {
-                    story.format_chars(t.range.clone(), set);
-                }
-            }
-            Ok(json!({"swatch": name}))
-        });
+    let (ids, texts) = if text { (vec![], super::text::format_targets_pub(s)) } else { (super::targets(s, p)?, vec![]) };
+    if text && texts.is_empty() {
+        return Err(bad("object.color", "select the text to colour"));
     }
-    let ids = super::targets(s, p)?;
-    s.edit(|d, _| {
+    // A caret: the colour is for the next typing (once the swatch exists).
+    let caret = matches!(texts.as_slice(), [t] if t.range.is_empty());
+    let r = s.edit(|d, _| {
         let name = color_swatch(d, color);
         color_items(d, &ids, &name, stroke);
+        if !caret {
+            let a = if stroke {
+                CharAttrs { stroke: Some(name.clone()), stroke_tint: Some(1.0), ..Default::default() }
+            } else {
+                CharAttrs { fill: Some(name.clone()), fill_tint: Some(1.0), ..Default::default() }
+            };
+            super::text::apply_char_attrs(d, &texts, &a, &[]);
+        }
         Ok(json!({"swatch": name}))
-    })
+    })?;
+    if caret && let Some(name) = r.get("swatch").cloned() {
+        let attrs = if stroke { json!({"stroke": name, "strokeTint": 1.0}) } else { json!({"fill": name, "fillTint": 1.0}) };
+        super::text::format_chars(s, &attrs)?;
+    }
+    Ok(r)
 }
 
 /// A process swatch holding exactly `color`, else a new unnamed one (hidden from the Swatches
@@ -1153,7 +1135,7 @@ fn add_to_swatches(s: &mut Session, p: &Value) -> Result<Value> {
         }
     };
     let rename = str_param(p, "name").map(str::to_string);
-    s.edit(|d, _| {
+    let result = s.edit(|d, _| {
         let w = d.swatches.iter_mut().find(|w| w.name == name).ok_or_else(|| bad("swatch.addToSwatches", format!("no swatch `{name}`")))?;
         if w.locked {
             return Err(bad("swatch.addToSwatches", "special swatches are already listed"));
@@ -1180,8 +1162,84 @@ fn add_to_swatches(s: &mut Session, p: &Value) -> Result<Value> {
                 rename_in(std::sync::Arc::make_mut(top), &name, &new);
             }
         }
+        for st in d.stories.values_mut() {
+            let mut copy = (**st).clone();
+            if rename_in_story(&mut copy, &name, &new, 0)? {
+                *st = std::sync::Arc::new(copy);
+            }
+        }
         Ok(json!({"name": new}))
-    })
+    })?;
+    if let Some(new) = result.get("name").and_then(Value::as_str) {
+        super::text::rename_typing_swatch(s, &name, new);
+    }
+    Ok(result)
+}
+
+/// Point text colours (character fill, stroke, underline and strikethrough; paragraph shading,
+/// border and rules; table cells, borders and alternating fills) at a renamed swatch, in a story
+/// and the texts inside it (table cells, footnotes, endnotes). Returns whether anything changed.
+fn rename_in_story(st: &mut designcraft_doc::Story, from: &str, to: &str, depth: usize) -> Result<bool> {
+    // Refuse the whole edit instead of leaving deeper references pointing at a removed name.
+    if depth > 32 {
+        return Err(bad("swatch.addToSwatches", "story nesting exceeds 32 levels"));
+    }
+    fn fix(s: &mut String, from: &str, to: &str) -> bool {
+        let hit = s == from;
+        if hit {
+            *s = to.to_string();
+        }
+        hit
+    }
+    let mut n = 0;
+    let mut f = |s: &mut String| n += usize::from(fix(s, from, to));
+    for r in &mut st.chars {
+        let o = &mut r.format.over;
+        for c in [&mut o.fill, &mut o.stroke, &mut o.underline_color, &mut o.strikethrough_color].into_iter().flatten() {
+            f(c);
+        }
+    }
+    for pf in &mut st.paras {
+        let a = &mut pf.para;
+        for c in [&mut a.shading_color, &mut a.border_color].into_iter().flatten() {
+            f(c);
+        }
+        for r in [&mut a.rule_above, &mut a.rule_below].into_iter().flatten() {
+            f(&mut r.color);
+        }
+    }
+    let mut nested = false;
+    for t in st.tables.values_mut() {
+        let t = std::sync::Arc::make_mut(t);
+        let o = &mut t.options;
+        f(&mut o.border.color);
+        for b in o.borders.iter_mut().flatten() {
+            f(&mut b.color);
+        }
+        for a in [&mut o.alt_rows, &mut o.alt_cols].into_iter().flatten() {
+            f(&mut a.first_color);
+            f(&mut a.next_color);
+        }
+        for k in [&mut o.row_strokes, &mut o.column_strokes].into_iter().flatten() {
+            f(&mut k.first_stroke.color);
+            f(&mut k.next_stroke.color);
+        }
+        for c in &mut t.cells {
+            f(&mut c.fill);
+            for k in &mut c.strokes {
+                f(&mut k.color);
+            }
+            nested |= rename_in_story(&mut c.text, from, to, depth + 1)?;
+        }
+    }
+    for note in st.notes.iter_mut().chain(st.endnotes.iter_mut()) {
+        nested |= rename_in_story(&mut std::sync::Arc::make_mut(note).text, from, to, depth + 1)?;
+    }
+    let changed = n > 0 || nested;
+    if changed {
+        st.rev = st.rev.wrapping_add(1);
+    }
+    Ok(changed)
 }
 
 /// Point fills and strokes of an item (and its children) at a renamed swatch.
@@ -1495,6 +1553,40 @@ mod color_tests {
         s.execute("object.color", &json!({"color": {"c": 10, "m": 20, "y": 30, "k": 0}})).unwrap();
         assert_eq!(s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().fill.swatch, "Sand");
     }
+
+    #[test]
+    fn add_to_swatches_renames_the_colour_in_text_cells_and_notes() {
+        use std::sync::Arc;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 300], "content": "text", "text": "Hello world"})).unwrap();
+        let sid = designcraft_doc::StoryId(r["story"].as_u64().unwrap());
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 11})).unwrap();
+        s.execute("footnote.insert", &json!({"text": "note"})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 0})).unwrap();
+        s.execute("table.insert", &json!({"rows": 1, "cols": 1})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 1, "focus": 4})).unwrap();
+        let old = s.execute("object.color", &json!({"color": {"c": 10, "m": 20, "y": 30, "k": 0}})).unwrap()["swatch"].as_str().unwrap().to_string();
+        // The same unnamed colour on a cell, the cell's text and the footnote's text.
+        s.edit(|d, _| {
+            let st = d.story_mut(sid).unwrap();
+            let t = Arc::make_mut(st.tables.values_mut().next().unwrap());
+            t.cells[0].fill = old.clone();
+            t.cells[0].text.chars[0].format.over.fill = Some(old.clone());
+            Arc::make_mut(&mut st.notes[0]).text.chars[0].format.over.stroke = Some(old.clone());
+            Ok(())
+        })
+        .unwrap();
+        s.execute("swatch.addToSwatches", &json!({"swatch": old, "name": "Sand"})).unwrap();
+        let d = &s.doc().unwrap().doc;
+        let st = d.story(sid).unwrap();
+        assert_eq!(st.char_format_at(2).over.fill.as_deref(), Some("Sand"));
+        let cell = &st.tables.values().next().unwrap().cells[0];
+        assert_eq!(cell.fill, "Sand");
+        assert_eq!(cell.text.chars[0].format.over.fill.as_deref(), Some("Sand"));
+        assert_eq!(st.notes[0].text.chars[0].format.over.stroke.as_deref(), Some("Sand"));
+        d.check().unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1708,15 +1800,16 @@ mod sample_color_tests {
     }
 
     #[test]
-    fn nothing_to_sample_or_nothing_to_colour_is_refused_without_an_edit() {
+    fn nothing_to_sample_is_refused_without_an_edit() {
         let (mut s, _) = session_with_image();
         let f = s.execute("frame.create", &json!({"rect": [300, 300, 500, 360], "content": "text", "text": "Hi"})).unwrap();
         let fid = ItemId(f["id"].as_u64().unwrap());
         let story = s.doc().unwrap().doc.item(fid).unwrap().text_frame().unwrap().story;
         s.execute("text.select", &json!({"story": story.0, "anchor": 1, "focus": 1})).unwrap();
+        let sampled = s.execute("color.sample", &json!({"at": [100, 100]})).unwrap();
+        assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["fill"], sampled["swatch"]);
+        assert_eq!(s.doc().unwrap().doc.story(story).unwrap().text, "Hi", "caret color waits for typing");
         let undo = s.doc().unwrap().history.undo.len();
-        let caret = s.execute("color.sample", &json!({"at": [100, 100]})).unwrap_err().to_string();
-        assert!(caret.contains("select the text"), "{caret}");
         s.execute("text.select", &json!({"story": story.0, "anchor": 0, "focus": 2})).unwrap();
         let none = s.execute("color.sample", &json!({"at": [600, 600]})).unwrap_err().to_string();
         assert!(none.contains("no placed image"), "{none}");
@@ -1751,3 +1844,7 @@ mod sample_color_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "text_color_tests.rs"]
+mod text_color_tests;

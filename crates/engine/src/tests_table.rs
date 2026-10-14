@@ -17,6 +17,321 @@ fn check(s: &Session) {
 }
 
 #[test]
+fn table_text_replacement_floors_utf8_selection_and_allows_quote_typing() {
+    for (original, (a, b), replacement, (after_a, after_b), quoted) in [
+        ("a", (1, 1), "é", (0, 0), Some("“é")), // Exact caret/quote baseline.
+        ("abc", (3, 3), "🙂", (0, 0), Some("“🙂")),
+        ("ab", (1, 2), "éX", (0, 2), None),
+        ("ab", (2, 1), "éX", (2, 0), None),
+        ("abcdef", (3, 5), "🙂éX", (0, 4), None),
+        ("abcdef", (5, 3), "🙂éX", (4, 0), None),
+        ("abc", (1, 2), "🙂", (0, 0), None),     // Both endpoints floor to the same boundary.
+        ("abcdef", (2, 6), "é🙂", (2, 6), None), // Valid Unicode endpoints stay fixed.
+        ("abcdef", (1, 4), "ABCDEF", (1, 4), None),
+        ("abcdef", (4, 1), "ABCDEF", (4, 1), None),
+        ("abcdef", (6, 6), "é", (2, 2), None), // Shortening clamps to EOF.
+        ("abc", (1, 3), "", (0, 0), None),
+    ] {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let frame = s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": ""})).unwrap();
+        let sid = frame["story"].as_u64().unwrap();
+        let fid = frame["id"].as_u64().unwrap();
+        let tid = s.execute("table.insert", &json!({"rows": 1, "cols": 1})).unwrap()["table"].as_u64().unwrap();
+        s.execute("text.insert", &json!({"text": original, "raw": true})).unwrap();
+        // Real commands position the child selection; text.select addresses parent stories.
+        for _ in a..original.len() {
+            s.execute("text.move", &json!({"dir": "left"})).unwrap();
+        }
+        let (dir, steps) = if b >= a { ("right", b - a) } else { ("left", a - b) };
+        for _ in 0..steps {
+            s.execute("text.move", &json!({"dir": dir, "extend": true})).unwrap();
+        }
+        let mut expected = s.doc().unwrap().selection.clone();
+        let selected = expected.text.as_mut().unwrap();
+        assert_eq!((selected.anchor, selected.focus), (a, b));
+        assert_eq!(selected.frame, Some(doc::ItemId(fid)));
+        assert_eq!(selected.cell, Some(doc::CellAddr { table: tid, row: 0, col: 0 }));
+        (selected.anchor, selected.focus) = (after_a, after_b);
+        let parent = s.doc().unwrap().doc.story(doc::StoryId(sid)).unwrap().text.clone();
+        s.execute("table.setCell", &json!({"text": replacement})).unwrap();
+        assert_eq!(table_for(&s, sid, tid).cell(0, 0).unwrap().text.text, replacement);
+        assert_eq!(s.doc().unwrap().selection, expected, "{original}: {a}->{b}, replacement {replacement}");
+        assert!(replacement.is_char_boundary(after_a) && replacement.is_char_boundary(after_b));
+        assert_eq!(s.doc().unwrap().doc.story(doc::StoryId(sid)).unwrap().text, parent);
+        if let Some(quoted) = quoted {
+            assert!(s.prefs.typographers_quotes);
+            s.execute("text.insert", &json!({"text": "\""})).unwrap();
+            assert_eq!(table_for(&s, sid, tid).cell(0, 0).unwrap().text.text, quoted);
+            let selected = expected.text.as_mut().unwrap();
+            (selected.anchor, selected.focus) = (3, 3); // Opening curly quote is three bytes.
+            assert_eq!(s.doc().unwrap().selection, expected);
+        }
+        check(&s);
+    }
+}
+
+#[test]
+fn table_edit_after_anchor_removal_floors_parent_caret() {
+    for (original, (a, b), replacement, pos, quoted, typed_pos) in [("ab", (1, 2), "é", 0, "“é\n", 3), ("abcde", (5, 1), "é🙂", 2, "é”🙂\n", 5)]
+    {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let other = s.execute("frame.create", &json!({"rect": [320, 36, 580, 200], "content": "text"})).unwrap();
+        let other_sid = other["story"].as_u64().unwrap();
+        let other_tid = s.execute("table.insert", &json!({"rows": 1, "cols": 1})).unwrap()["table"].as_u64().unwrap();
+        s.execute("text.insert", &json!({"text": "keep", "raw": true})).unwrap();
+        let mut expected_other = table_for(&s, other_sid, other_tid).clone();
+        expected_other.cell_mut(0, 0).unwrap().insets = [7.0; 4];
+
+        let frame = s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text"})).unwrap();
+        let sid = frame["story"].as_u64().unwrap();
+        let tid = s.execute("table.insert", &json!({"rows": 1, "cols": 1})).unwrap()["table"].as_u64().unwrap();
+        s.execute("text.insert", &json!({"text": original, "raw": true})).unwrap();
+        for _ in a..original.len() {
+            s.execute("text.move", &json!({"dir": "left"})).unwrap();
+        }
+        let (dir, steps) = if b >= a { ("right", b - a) } else { ("left", a - b) };
+        for _ in 0..steps {
+            s.execute("text.move", &json!({"dir": dir, "extend": true})).unwrap();
+        }
+        let mut expected = s.doc().unwrap().selection.clone();
+        let selected = expected.text.unwrap();
+        assert_eq!((selected.anchor, selected.focus), (a, b));
+        assert_eq!(selected.frame, Some(doc::ItemId(frame["id"].as_u64().unwrap())));
+        assert_eq!(selected.cell, Some(doc::CellAddr { table: tid, row: 0, col: 0 }));
+        // Explicit parent replacement removes its anchor, leaving the child address stale.
+        assert_eq!(
+            s.execute("find.change", &json!({"story": sid, "find": doc::TABLE_ANCHOR.to_string(), "change": replacement})).unwrap()["count"],
+            1
+        );
+        let parent = s.doc().unwrap().doc.story(doc::StoryId(sid)).unwrap();
+        assert_eq!(parent.text, format!("{replacement}\n"));
+        assert!(!parent.tables.contains_key(&tid));
+        assert_eq!(s.doc().unwrap().selection, expected);
+        assert!(!parent.text.is_char_boundary(selected.anchor));
+        // An explicit edit to the surviving table reaches the disappeared-table fallback.
+        s.execute("table.setCell", &json!({"story": other_sid, "table": other_tid, "insets": 7})).unwrap();
+        let selected = expected.text.as_mut().unwrap();
+        (selected.anchor, selected.focus, selected.cell) = (pos, pos, None); // Both floor the OLD anchor.
+        assert_eq!(s.doc().unwrap().selection, expected);
+        assert_eq!(s.doc().unwrap().doc.story(doc::StoryId(sid)).unwrap().text, format!("{replacement}\n"));
+        assert_eq!(table_for(&s, other_sid, other_tid), &expected_other);
+        s.execute("text.insert", &json!({"text": "\""})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.story(doc::StoryId(sid)).unwrap().text, quoted);
+        let selected = expected.text.as_mut().unwrap();
+        (selected.anchor, selected.focus) = (typed_pos, typed_pos);
+        assert_eq!(s.doc().unwrap().selection, expected);
+        assert_eq!(table_for(&s, other_sid, other_tid), &expected_other);
+        check(&s);
+    }
+}
+
+fn selected_merged_table(column: bool) -> (Session, u64, u64, u64) {
+    let (mut s, sid, fid) = session_with_frame();
+    let tid = s.execute("table.insert", &json!({"rows": 2, "cols": 2})).unwrap()["table"].as_u64().unwrap();
+    for (i, text) in ["A", "B", "C", "D"].iter().enumerate() {
+        s.execute("text.insert", &json!({"text": text})).unwrap();
+        if i < 3 {
+            s.execute("table.nextCell", &json!({})).unwrap();
+        }
+    }
+    let merge = if column { json!({"rows": [0, 0], "cols": [0, 1]}) } else { json!({"rows": [0, 1], "cols": [0, 0]}) };
+    s.execute("table.select", &merge).unwrap();
+    s.execute("table.merge", &json!({})).unwrap();
+    s.execute("table.select", &json!({"rows": [1, 1], "cols": [1, 1]})).unwrap();
+    s.execute(if column { "table.selectColumn" } else { "table.selectRow" }, &json!({})).unwrap();
+    (s, sid, tid, fid)
+}
+
+#[test]
+fn selected_merged_owners_receive_text_formatting_and_character_styles() {
+    for column in [true, false] {
+        let (mut s, sid, tid, _) = selected_merged_table(column);
+        let selected = s.doc().unwrap().selection.clone();
+        assert_eq!(selected.cells.unwrap().range, if column { doc::CellRange::new(0, 1, 1, 1) } else { doc::CellRange::new(1, 0, 1, 1) });
+        let before = table_for(&s, sid, tid).clone();
+        let neighbor = if column { (1, 0) } else { (0, 1) };
+        s.execute("type.char", &json!({"attrs": {"size": 23}})).unwrap();
+        for (r, c) in [(0, 0), (1, 1)] {
+            let cell = table_for(&s, sid, tid).cell(r, c).unwrap();
+            assert!(cell.text.runs().all(|(_, f)| f.over.size == Some(23.0)), "all runs of owner {r},{c}");
+            assert_eq!(cell.text.text, before.cell(r, c).unwrap().text.text);
+        }
+        assert_eq!(table_for(&s, sid, tid).cell(neighbor.0, neighbor.1), before.cell(neighbor.0, neighbor.1));
+        assert_eq!(s.doc().unwrap().selection, selected);
+        s.execute("style.character.create", &json!({"name": "Selected owners", "chars": {"tracking": 37}})).unwrap();
+        s.execute("style.character.apply", &json!({"name": "Selected owners"})).unwrap();
+        for (r, c) in [(0, 0), (1, 1)] {
+            assert!(table_for(&s, sid, tid).cell(r, c).unwrap().text.runs().all(|(_, f)| f.style == "Selected owners"));
+        }
+        let after = table_for(&s, sid, tid);
+        assert_eq!(after.cell(neighbor.0, neighbor.1), before.cell(neighbor.0, neighbor.1));
+        assert_eq!(after.rows, before.rows);
+        assert_eq!(after.columns, before.columns);
+        assert_eq!(s.doc().unwrap().selection, selected, "formatting preserves the original grid rectangle");
+        check(&s);
+    }
+}
+
+#[test]
+fn selected_merged_owners_receive_cell_options_and_unique_style_counts() {
+    for column in [true, false] {
+        let (mut s, sid, tid, _) = selected_merged_table(column);
+        let range = s.doc().unwrap().selection.cells.unwrap().range;
+        let before = table_for(&s, sid, tid).clone();
+        let neighbor = if column { (1, 0) } else { (0, 1) };
+        let covered = if column { (0, 1) } else { (1, 0) };
+        s.execute("table.setCell", &json!({"fill": "[Black]", "insets": 7, "text": "REPLACED"})).unwrap();
+        for (r, c) in [(0, 0), (1, 1)] {
+            let cell = table_for(&s, sid, tid).cell(r, c).unwrap();
+            assert_eq!(serde_json::to_value(&cell.fill).unwrap(), json!("[Black]"));
+            assert_eq!(cell.insets, [7.0; 4]);
+            assert_eq!(cell.text.text, "REPLACED");
+        }
+        s.execute("style.cell.create", &json!({"name": "Selected cell owners", "insets": 9})).unwrap();
+        assert_eq!(s.execute("style.cell.apply", &json!({"name": "Selected cell owners"})).unwrap()["cells"], 2);
+        let after = table_for(&s, sid, tid);
+        for (r, c) in [(0, 0), (1, 1)] {
+            assert_eq!(after.cell(r, c).unwrap().style, "Selected cell owners");
+            assert_eq!(after.cell(r, c).unwrap().insets, [9.0; 4]);
+        }
+        assert_eq!(after.cell(neighbor.0, neighbor.1), before.cell(neighbor.0, neighbor.1));
+        assert_eq!(after.cell(covered.0, covered.1), before.cell(covered.0, covered.1));
+        assert_eq!(after.rows, before.rows);
+        assert_eq!(after.columns, before.columns);
+        assert_eq!(s.doc().unwrap().selection.cells.unwrap().range, range);
+        let merged = if column { json!({"rows": [0, 0], "cols": [0, 1]}) } else { json!({"rows": [0, 1], "cols": [0, 0]}) };
+        s.execute("table.select", &merged).unwrap();
+        assert_eq!(s.execute("style.cell.apply", &json!({"name": "Selected cell owners"})).unwrap()["cells"], 1);
+        check(&s);
+    }
+}
+
+#[test]
+fn covered_owner_strokes_keep_literal_edge_masks_and_neighbors() {
+    for rtl in [false, true] {
+        for outer in [false, true] {
+            let (mut s, sid, tid, _) = selected_merged_table(true);
+            if rtl {
+                s.execute("table.options", &json!({"direction": "rightToLeft"})).unwrap();
+            }
+            s.execute("table.select", &json!({"rows": [0, 0], "cols": [1, 1]})).unwrap();
+            let before = table_for(&s, sid, tid).clone();
+            s.execute("table.setCell", &json!({"stroke": {"weight": 3, "edges": if outer { "outer" } else { "inner" }}})).unwrap();
+            let after = table_for(&s, sid, tid);
+            let mask = if rtl { [true, true, true, false] } else { [true, false, true, true] };
+            let expected = mask.map(|edge| if outer { edge } else { !edge });
+            let owner = after.cell(0, 0).unwrap();
+            assert_eq!(owner.border_overrides, expected);
+            assert_eq!(owner.stroke_defined, expected);
+            for (i, on) in expected.into_iter().enumerate() {
+                if on {
+                    assert_eq!(owner.strokes[i].weight, 3.0);
+                    assert_eq!(owner.stroke_priorities[i], 1);
+                } else {
+                    assert_eq!(owner.strokes[i], before.cell(0, 0).unwrap().strokes[i]);
+                }
+            }
+            for (r, c) in [(0, 1), (1, 0), (1, 1)] {
+                assert_eq!(after.cell(r, c), before.cell(r, c), "strict merged/covered mirror guard preserves {r},{c}");
+            }
+            assert_eq!(s.doc().unwrap().selection.cells.unwrap().range, doc::CellRange::cell(0, 1));
+            check(&s);
+        }
+    }
+}
+
+#[test]
+fn cell_style_sampling_resolves_covered_point_but_retains_upper_left_policy() {
+    let (mut s, sid, tid, _) = selected_merged_table(true);
+    s.execute("table.setCell", &json!({"row": 0, "col": 0, "insets": 7})).unwrap();
+    s.execute("table.select", &json!({"rows": [0, 0], "cols": [1, 1]})).unwrap();
+    let selection = s.doc().unwrap().selection.clone();
+    let before = table_for(&s, sid, tid).clone();
+    s.execute("style.cell.create", &json!({"name": "Covered", "fromSelection": true})).unwrap();
+    assert_eq!(s.doc().unwrap().doc.styles.cell.iter().find(|c| c.name == "Covered").unwrap().insets, Some([7.0; 4]));
+    assert_eq!(table_for(&s, sid, tid), &before);
+    assert_eq!(s.doc().unwrap().selection, selection);
+
+    let (mut s, sid, _) = session_with_frame();
+    let tid = s.execute("table.insert", &json!({"rows": 2, "cols": 2})).unwrap()["table"].as_u64().unwrap();
+    s.execute("table.select", &json!({"rows": [0, 1], "cols": [1, 1]})).unwrap();
+    s.execute("table.merge", &json!({})).unwrap();
+    for (row, col, insets, size) in [(0, 1, 7, 17), (1, 0, 11, 29)] {
+        s.execute("table.setCell", &json!({"row": row, "col": col, "text": "Text", "insets": insets})).unwrap();
+        s.execute("table.select", &json!({"rows": [row, row], "cols": [col, col]})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"size": size}})).unwrap();
+    }
+    s.execute("table.selectRow", &json!({})).unwrap();
+    let before = table_for(&s, sid, tid).clone();
+    let selection = s.doc().unwrap().selection.clone();
+    // Row-major owners are [(0,1),(1,0)], while the rectangle starts at (1,0).
+    assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["size"], 17.0);
+    s.execute("style.cell.create", &json!({"name": "Upper left", "fromSelection": true})).unwrap();
+    assert_eq!(s.doc().unwrap().doc.styles.cell.iter().find(|c| c.name == "Upper left").unwrap().insets, Some([11.0; 4]));
+    assert_eq!(table_for(&s, sid, tid), &before);
+    assert_eq!(s.doc().unwrap().selection, selection);
+}
+
+#[test]
+fn selected_merged_owners_convert_graphics_back_to_text() {
+    let png = designcraft_render::Rendered { width: 1, height: 1, pixels: vec![255, 0, 0, 255] }.to_png();
+    let image = crate::cmd::base64_encode(&png);
+    for column in [true, false] {
+        let (mut s, sid, tid, _) = selected_merged_table(column);
+        let neighbor = if column { (1, 0) } else { (0, 1) };
+        let covered = if column { (0, 1) } else { (1, 0) };
+        for (r, c) in [covered, (1, 1), neighbor] {
+            let placed = s.execute("table.placeGraphic", &json!({"row": r, "col": c, "base64": image, "name": "cell.png"})).unwrap();
+            if (r, c) == covered {
+                assert_eq!((placed["row"].as_u64(), placed["col"].as_u64()), (Some(0), Some(0)));
+            }
+        }
+        let before = table_for(&s, sid, tid).clone();
+        let selected = s.doc().unwrap().selection.cells.unwrap();
+        s.execute("table.textCell", &json!({})).unwrap();
+        let after = table_for(&s, sid, tid);
+        for (r, c) in [(0, 0), (1, 1)] {
+            assert!(before.cell(r, c).unwrap().graphic.is_some());
+            assert!(after.cell(r, c).unwrap().graphic.is_none());
+            assert_eq!(after.cell(r, c).unwrap().text, before.cell(r, c).unwrap().text);
+        }
+        assert_eq!(after.cell(neighbor.0, neighbor.1), before.cell(neighbor.0, neighbor.1));
+        assert_eq!(after.cell(covered.0, covered.1), before.cell(covered.0, covered.1));
+        assert_eq!(s.doc().unwrap().selection.cells, Some(selected));
+        check(&s);
+    }
+}
+
+#[test]
+fn covered_selected_owner_drag_keeps_merged_move_restrictions_atomic() {
+    for column in [true, false] {
+        let (mut s, sid, _, fid) = selected_merged_table(column);
+        let before = s.doc().unwrap().doc.clone();
+        let selection = s.doc().unwrap().selection.clone();
+        let revision = s.doc().unwrap().revision;
+        let undo = s.doc().unwrap().history.undo.len();
+        let redo = s.doc().unwrap().history.redo.len();
+        let cs = s.cache.get(&before, doc::StoryId(sid), None);
+        let cells = &cs.frames[0].tables[0].cells;
+        let point = |row, col| {
+            let cell = cells.iter().find(|c| c.row == row && c.col == col).unwrap();
+            before.text_xf(before.item(doc::ItemId(fid)).unwrap()) * cell.rect.center()
+        };
+        let from = point(0, 0);
+        let to = if column { point(1, 0) } else { point(0, 1) };
+        let err = s.execute("table.dropCells", &json!({"frame": fid, "from": [from.x, from.y], "to": [to.x, to.y]})).unwrap_err();
+        assert!(err.to_string().contains(if column { "unmerge cells that span columns" } else { "unmerge cells that span rows" }), "{err}");
+        let st = s.doc().unwrap();
+        assert_eq!(st.doc, before);
+        assert_eq!(st.selection, selection);
+        assert_eq!(st.revision, revision);
+        assert_eq!((st.history.undo.len(), st.history.redo.len()), (undo, redo));
+    }
+}
+
+#[test]
 fn insert_type_in_cells_and_tab() {
     let (mut s, sid, _) = session_with_frame();
     let r = s.execute("table.insert", &json!({"rows": 2, "cols": 3, "headerRows": 1})).unwrap();

@@ -7,6 +7,7 @@
 //! whole table).
 
 use designcraft_compose as compose;
+use designcraft_doc::story::floor_char_boundary;
 use designcraft_doc::{
     AltFills, CellAddr, CellRange, CellStroke, Document, RowHeightMode, Selection, StoryId, StrokeType, Table, TableSel, TextSel,
     VerticalJustification,
@@ -140,11 +141,9 @@ fn table_specs() -> Vec<CommandSpec> {
             |s, p| {
                 let g = target(s, p, "table.textCell")?;
                 edit_table(s, &g, "table.textCell", |t| {
-                    for r in g.range.r0..=g.range.r1 {
-                        for c in g.range.c0..=g.range.c1 {
-                            if let Some(cell) = t.cell_mut(r, c) {
-                                cell.graphic = None;
-                            }
+                    for (r, c) in t.selected_owners(g.range) {
+                        if let Some(cell) = t.cell_mut(r, c) {
+                            cell.graphic = None;
                         }
                     }
                     ok()
@@ -351,13 +350,17 @@ fn clamp_selection(d: &Document, sel: &mut Selection) {
         match story.and_then(|x| x.tables.get(&c.table)) {
             Some(tb) => {
                 let (r, col) = tb.owner(c.row.min(tb.nrows() - 1), c.col.min(tb.ncols() - 1));
-                let len = tb.cell(r, col).map_or(0, |x| x.text.len());
-                sel.text =
-                    Some(TextSel { anchor: t.anchor.min(len), focus: t.focus.min(len), cell: Some(CellAddr { table: c.table, row: r, col }), ..t });
+                let text = tb.cell(r, col).map_or("", |x| x.text.text.as_str());
+                sel.text = Some(TextSel {
+                    anchor: floor_char_boundary(text, t.anchor),
+                    focus: floor_char_boundary(text, t.focus),
+                    cell: Some(CellAddr { table: c.table, row: r, col }),
+                    ..t
+                });
             }
             None => {
-                let len = story.map_or(0, |x| x.len());
-                sel.text = Some(TextSel { anchor: t.anchor.min(len), focus: t.anchor.min(len), cell: None, ..t });
+                let pos = story.map_or(0, |x| floor_char_boundary(&x.text, t.anchor));
+                sel.text = Some(TextSel { anchor: pos, focus: pos, cell: None, ..t });
             }
         }
     }
@@ -648,7 +651,6 @@ fn set_cell(s: &mut Session, p: &Value) -> Result<Value> {
     let text = str_param(p, "text").map(|_| super::text_param(p, "text"));
     let stroke = p.get("stroke").cloned();
     edit_table(s, &g, "table.setCell", |t| {
-        let owners = t.owners();
         let nc = t.ncols();
         let nr = t.nrows();
         let rtl = t.options.direction == designcraft_doc::TextDirection::RightToLeft;
@@ -656,50 +658,45 @@ fn set_cell(s: &mut Session, p: &Value) -> Result<Value> {
         // Local edits outrank previously imported edges, including explicit zero/None.
         let priority = if stroke.is_some() { next_cell_stroke_priority(t) } else { 0 };
         let rg = g.range;
-        for r in rg.r0..=rg.r1 {
-            for c in rg.c0..=rg.c1 {
-                if owners[r * nc + c] != (r, c) {
-                    continue;
-                }
-                let Some(cell) = t.cell_mut(r, c) else { continue };
-                if let Some(f) = &fill {
-                    cell.fill = f.clone();
-                }
-                if let Some(ti) = tint {
-                    cell.fill_tint = ti;
-                }
-                if let Some(i) = insets {
-                    cell.insets = i;
-                }
-                if let Some(v) = vj {
-                    cell.vj = v;
-                }
-                if let Some(tx) = &text {
-                    let len = cell.text.len();
-                    cell.text.replace(0..len, tx);
-                }
-                if let Some(sv) = &stroke {
-                    let edges = str_param(sv, "edges").unwrap_or("all");
-                    let at_bottom = r.saturating_add(cell.row_span.max(1) as usize);
-                    let at_right = c.saturating_add(cell.col_span.max(1) as usize);
-                    let perimeter = [r == 0, if rtl { at_right == nc } else { c == 0 }, at_bottom == nr, if rtl { c == 0 } else { at_right == nc }];
-                    for (i, on) in [
-                        ("top", r == rg.r0),
-                        ("left", if rtl { at_right.saturating_sub(1) == rg.c1 } else { c == rg.c0 }),
-                        ("bottom", at_bottom.saturating_sub(1) == rg.r1),
-                        ("right", if rtl { c == rg.c0 } else { at_right.saturating_sub(1) == rg.c1 }),
-                    ]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, outer))| (i, edges == "all" || edges == *name || (edges == "outer" && *outer) || (edges == "inner" && !*outer)))
-                    {
-                        if on {
-                            let base = if perimeter[i] && !cell.border_overrides[i] { &borders[i] } else { &cell.strokes[i] };
-                            cell.strokes[i] = parse_stroke(sv, base.clone());
-                            cell.stroke_defined[i] = true;
-                            cell.stroke_priorities[i] = priority;
-                            cell.border_overrides[i] = true;
-                        }
+        for (r, c) in t.selected_owners(rg) {
+            let Some(cell) = t.cell_mut(r, c) else { continue };
+            if let Some(f) = &fill {
+                cell.fill = f.clone();
+            }
+            if let Some(ti) = tint {
+                cell.fill_tint = ti;
+            }
+            if let Some(i) = insets {
+                cell.insets = i;
+            }
+            if let Some(v) = vj {
+                cell.vj = v;
+            }
+            if let Some(tx) = &text {
+                let len = cell.text.len();
+                cell.text.replace(0..len, tx);
+            }
+            if let Some(sv) = &stroke {
+                let edges = str_param(sv, "edges").unwrap_or("all");
+                let at_bottom = r.saturating_add(cell.row_span.max(1) as usize);
+                let at_right = c.saturating_add(cell.col_span.max(1) as usize);
+                let perimeter = [r == 0, if rtl { at_right == nc } else { c == 0 }, at_bottom == nr, if rtl { c == 0 } else { at_right == nc }];
+                for (i, on) in [
+                    ("top", r == rg.r0),
+                    ("left", if rtl { at_right.saturating_sub(1) == rg.c1 } else { c == rg.c0 }),
+                    ("bottom", at_bottom.saturating_sub(1) == rg.r1),
+                    ("right", if rtl { c == rg.c0 } else { at_right.saturating_sub(1) == rg.c1 }),
+                ]
+                .iter()
+                .enumerate()
+                .map(|(i, (name, outer))| (i, edges == "all" || edges == *name || (edges == "outer" && *outer) || (edges == "inner" && !*outer)))
+                {
+                    if on {
+                        let base = if perimeter[i] && !cell.border_overrides[i] { &borders[i] } else { &cell.strokes[i] };
+                        cell.strokes[i] = parse_stroke(sv, base.clone());
+                        cell.stroke_defined[i] = true;
+                        cell.stroke_priorities[i] = priority;
+                        cell.border_overrides[i] = true;
                     }
                 }
             }
@@ -707,6 +704,7 @@ fn set_cell(s: &mut Session, p: &Value) -> Result<Value> {
         // Keep both copies of unmerged shared boundaries consistent. Left/right name
         // physical sides, also in RTL tables.
         if let Some(sv) = &stroke {
+            let owners = t.owners();
             let edges = str_param(sv, "edges").unwrap_or("all");
             let selected = |side: &str| edges == "all" || edges == "outer" || edges == side;
             if selected("top")
@@ -931,8 +929,9 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(v) = p.get("altCols") {
             o.alt_cols = parse_alt(v);
         }
-        let h = p.get("headerRows").and_then(Value::as_u64).map(|v| v as usize);
-        let f = p.get("footerRows").and_then(Value::as_u64).map(|v| v as usize);
+        // At most 100 of each, as in `table.insert`: the rows the table lacks are added below.
+        let h = p.get("headerRows").and_then(Value::as_u64).map(|v| v.min(100) as usize);
+        let f = p.get("footerRows").and_then(Value::as_u64).map(|v| v.min(100) as usize);
         if h.is_some() || f.is_some() {
             let (h, f) = (h.unwrap_or(t.header_rows()), f.unwrap_or(t.footer_rows()));
             // Add rows when there aren't enough for the requested header/footer plus one body row.
@@ -1095,7 +1094,10 @@ fn cell_style_create(s: &mut Session, p: &Value) -> Result<Value> {
         let cell = d
             .story(g.story)
             .and_then(|st| st.tables.get(&g.table))
-            .and_then(|t| t.cell(g.range.r0, g.range.c0))
+            .and_then(|t| {
+                let (r, c) = t.owner(g.range.r0, g.range.c0);
+                t.cell(r, c)
+            })
             .ok_or_else(|| bad("style.cell.create", "no cell"))?;
         cs.fill = Some(cell.fill.clone());
         cs.fill_tint = Some(cell.fill_tint);
@@ -1122,17 +1124,11 @@ fn cell_style_apply(s: &mut Session, p: &Value) -> Result<Value> {
     let cs = designcraft_doc::resolve_cell_style(styles, &name);
     let g = target(s, p, "style.cell.apply")?;
     edit_table(s, &g, "style.cell.apply", |t| {
-        let owners = t.owners();
-        let nc = t.ncols();
         let mut n = 0;
-        for r in g.range.r0..=g.range.r1 {
-            for c in g.range.c0..=g.range.c1 {
-                if owners[r * nc + c] == (r, c)
-                    && let Some(cell) = t.cell_mut(r, c)
-                {
-                    cs.apply_to(cell);
-                    n += 1;
-                }
+        for (r, c) in t.selected_owners(g.range) {
+            if let Some(cell) = t.cell_mut(r, c) {
+                cs.apply_to(cell);
+                n += 1;
             }
         }
         Ok(json!({"cells": n}))
@@ -1353,7 +1349,7 @@ fn drop_cells(s: &mut Session, p: &Value) -> Result<Value> {
         && ts.story == sid
         && ts.table == tid
         && tid2 == tid
-        && ts.range.contains(fr, fc)
+        && s.doc()?.doc.story(sid).and_then(|st| st.tables.get(&tid)).is_some_and(|t| t.selected_owners(ts.range).binary_search(&(fr, fc)).is_ok())
     {
         let (nr, nc) = {
             let t = s.doc()?.doc.story(sid).and_then(|st| st.tables.get(&tid)).ok_or_else(|| bad(ID, "no table"))?;
@@ -1679,6 +1675,19 @@ mod sort_tests {
         assert_eq!([cell(&s, 0, 0), cell(&s, 1, 0), cell(&s, 2, 0)], ["b", "c", "a"]);
         s.execute("table.moveColumn", &json!({"from": 1, "to": 0})).unwrap();
         assert_eq!((cell(&s, 2, 0), cell(&s, 2, 1)), ("x".to_string(), "a".to_string()));
+    }
+
+    #[test]
+    fn table_options_limits_header_and_footer_rows() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 500, 700], "content": "text", "text": ""})).unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 0})).unwrap();
+        s.execute("table.insert", &json!({"rows": 2, "cols": 2})).unwrap();
+        // The limit `table.insert` has: the table used to grow by as many rows as were asked for.
+        s.execute("table.options", &json!({"headerRows": 5000, "footerRows": 5000})).unwrap();
+        let t = table(&s);
+        assert_eq!((t.header_rows(), t.footer_rows(), t.nrows()), (100, 100, 201));
     }
 }
 

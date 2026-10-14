@@ -1,6 +1,7 @@
-//! EPS: there's no PostScript interpreter here, so a placed EPS shows (and prints) through a
-//! proxy, as InDesign does on screen: the file's TIFF preview when it has one, else a placeholder
-//! the size of its bounding box.
+//! EPS: there's no general PostScript interpreter here, so a placed EPS shows (and prints)
+//! through a proxy, as InDesign does on screen: the file's TIFF preview when it has one, else the
+//! rectangles of a simple one drawn here (InDesign's QR codes), else a placeholder the size of its
+//! bounding box.
 
 /// An EPS file (plain, or DOS EPS with a binary header)?
 pub fn is_eps(bytes: &[u8]) -> bool {
@@ -45,6 +46,10 @@ pub fn eps_proxy(bytes: &[u8]) -> Option<(Vec<u8>, (f64, f64))> {
     {
         return Some((tiff.to_vec(), (w, h)));
     }
+    // Simple PostScript drawn here: InDesign's QR codes are coloured rectangles only.
+    if let Some(png) = render_rectangles(sections(bytes).0, bb) {
+        return Some((png, (w, h)));
+    }
     let (pw, ph) = ((w * 2.0).round().clamp(2.0, 4000.0) as u32, (h * 2.0).round().clamp(2.0, 4000.0) as u32);
     let mut img = image::RgbaImage::from_pixel(pw, ph, image::Rgba([228, 228, 228, 255]));
     // Diagonals and a border mark it as a stand-in.
@@ -68,9 +73,145 @@ pub fn eps_proxy(bytes: &[u8]) -> Option<(Vec<u8>, (f64, f64))> {
     Some((out, (w, h)))
 }
 
+/// Pixels per point for rendered EPS (a QR code's modules stay crisp when scaled up on screen).
+const RENDER_SCALE: f64 = 8.0;
+/// The most rectangles and operators read from an EPS before giving up on drawing it.
+const MAX_RECTS: usize = 200_000;
+const MAX_TOKENS: usize = 2_000_000;
+/// The most pixels painted, in multiples of the image's area (overlapping rectangles repaint).
+const MAX_PAINT_AREAS: u64 = 64;
+
+/// PostScript that only fills rectangles in solid colours (`setcmykcolor`, `setrgbcolor`,
+/// `setgray`, `rectfill`, and procedures that stand for one of them, such as InDesign's
+/// `/rf { rectfill } bind def`), drawn as a PNG of the bounding box `bb`. None for anything else
+/// (paths, text, images, transforms), which keeps its placeholder, or when nothing is drawn.
+fn render_rectangles(ps: &[u8], bb: [f64; 4]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(ps).ok()?;
+    let (w, h) = (bb[2] - bb[0], bb[3] - bb[1]);
+    if !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let scale = RENDER_SCALE.min(4000.0 / w.max(h));
+    let (pw, ph) = ((w * scale).round().max(1.0) as u32, (h * scale).round().max(1.0) as u32);
+    let mut img = image::RgbaImage::from_pixel(pw, ph, image::Rgba([0, 0, 0, 0]));
+    let mut aliases: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut stack: Vec<f64> = Vec::new();
+    let mut color = [0u8, 0, 0, 255];
+    let mut drawn = 0usize;
+    let mut painted = 0u64;
+    let paint_budget = u64::from(pw) * u64::from(ph) * MAX_PAINT_AREAS;
+    // Tokens without comments; `{ … }` procedures kept whole.
+    let mut tokens: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.split('%').next().unwrap_or("");
+        let spaced = line.replace('{', " { ").replace('}', " } ");
+        tokens.extend(spaced.split_whitespace().map(str::to_string));
+        if tokens.len() > MAX_TOKENS {
+            return None;
+        }
+    }
+    let unit = |v: f64| v.clamp(0.0, 1.0);
+    let mut i = 0;
+    while let Some(tok) = tokens.get(i) {
+        i += 1;
+        if let Ok(v) = tok.parse::<f64>() {
+            if !v.is_finite() {
+                return None;
+            }
+            stack.push(v);
+            continue;
+        }
+        // `/name { op } bind def`: name stands for op.
+        if let Some(name) = tok.strip_prefix('/') {
+            // At most `{ op } bind`: anything longer isn't an alias this reader knows.
+            let body: Vec<&String> = tokens.iter().skip(i).take(5).take_while(|t| *t != "def").collect();
+            let op = match body.as_slice() {
+                [open, op, close] | [open, op, close, _] if *open == "{" && *close == "}" => (*op).clone(),
+                _ => return None,
+            };
+            aliases.insert(name.to_string(), op);
+            i += body.len() + 1;
+            continue;
+        }
+        let op = aliases.get(tok).map_or(tok.as_str(), String::as_str);
+        let mut pop = |n: usize| -> Option<Vec<f64>> { (stack.len() >= n).then(|| stack.split_off(stack.len() - n)) };
+        match op {
+            "setcmykcolor" => {
+                let v = pop(4)?;
+                let k = unit(v[3]);
+                let ch = |c: f64| ((1.0 - unit(c)) * (1.0 - k) * 255.0).round() as u8;
+                color = [ch(v[0]), ch(v[1]), ch(v[2]), 255];
+            }
+            "setrgbcolor" => {
+                let v = pop(3)?;
+                let ch = |c: f64| (unit(c) * 255.0).round() as u8;
+                color = [ch(v[0]), ch(v[1]), ch(v[2]), 255];
+            }
+            "setgray" => {
+                let v = pop(1)?;
+                let g = (unit(v[0]) * 255.0).round() as u8;
+                color = [g, g, g, 255];
+            }
+            "rectfill" => {
+                let v = pop(4)?;
+                drawn += 1;
+                if drawn > MAX_RECTS {
+                    return None;
+                }
+                // PostScript y runs up; the image's down. Edges round to whole pixels, so
+                // touching rectangles (QR code modules) meet without gaps.
+                let (x0, x1) = ((v[0] - bb[0]) * scale, (v[0] + v[2] - bb[0]) * scale);
+                let (y0, y1) = ((bb[3] - (v[1] + v[3])) * scale, (bb[3] - v[1]) * scale);
+                let px = |a: f64, b: f64, max: u32| {
+                    let (lo, hi) = (a.min(b).round().max(0.0), a.max(b).round().min(max as f64));
+                    (lo as u32, hi.max(lo) as u32)
+                };
+                let ((xa, xb), (ya, yb)) = (px(x0, x1, pw), px(y0, y1, ph));
+                painted = painted.saturating_add(u64::from(xb - xa) * u64::from(yb - ya));
+                if painted > paint_budget {
+                    return None;
+                }
+                for y in ya..yb {
+                    for x in xa..xb {
+                        img.put_pixel(x, y, image::Rgba(color));
+                    }
+                }
+            }
+            "bind" | "gsave" | "grestore" | "newpath" | "showpage" | "save" | "restore" | "pop" | "end" | "begin" => {}
+            _ => return None,
+        }
+    }
+    if drawn == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simple_rectangle_eps_is_drawn_like_a_qr_code() {
+        // As InDesign writes QR codes: a procedure for rectfill, a colour, then modules.
+        let eps = b"%!PS-Adobe-3.1 EPSF-3.0\n%%BoundingBox: 0 0 4 4\n%%EndComments\n/rf { rectfill } bind def\n0 0 0 1 setcmykcolor\n0 2 2 2 rf\n2 0 2 2 rf\n%%EOF\n";
+        let (png, size) = eps_proxy(eps).unwrap();
+        assert_eq!(size, (4.0, 4.0));
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (32, 32), "8 pixels per point");
+        // PostScript y runs up: (0, 2)–(2, 4) is the image's top left.
+        assert_eq!(img.get_pixel(4, 4).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(28, 28).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(28, 4).0[3], 0, "undrawn stays transparent");
+        assert_eq!(img.get_pixel(4, 28).0[3], 0);
+        // Anything else (here a path) keeps the placeholder.
+        let curve = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 4 4\n0 0 moveto 4 4 lineto stroke\n%%EOF\n";
+        let (png, _) = eps_proxy(curve).unwrap();
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(2, 4).0, [228, 228, 228, 255]);
+    }
 
     #[test]
     fn eps_bounding_box_and_proxies() {

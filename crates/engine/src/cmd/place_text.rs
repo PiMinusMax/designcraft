@@ -124,19 +124,25 @@ fn fit(d: &Document, sid: StoryId) -> (Option<usize>, usize, usize) {
 }
 
 /// Thread new frames on new pages (margin rectangles) until the story fits. Returns pages added.
-pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize) -> Result<usize> {
+/// A story on a parent spread doesn't autoflow: its frames thread only on that parent. Errors
+/// name `cmd`, the command that autoflows.
+pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize, cmd: &str) -> Result<usize> {
+    let last = d.story(sid).and_then(|s| s.frames.last().copied()).ok_or_else(|| bad(cmd, "the story has no frame"))?;
+    if !matches!(d.find(last).map(|l| l.spread), Some(SpreadRef::Doc(_))) {
+        return Err(bad(cmd, "autoflow works only from a frame on a document page"));
+    }
     let mut added = 0;
     loop {
         let (overset, held, full) = fit(d, sid);
         let Some(at) = overset else { return Ok(added) };
         if added >= max_pages {
-            return Err(bad("file.place", format!("autoflow stopped after {max_pages} pages")));
+            return Err(bad(cmd, format!("autoflow stopped after {max_pages} pages")));
         }
         let len = d.story(sid).map_or(0, |s| s.len());
         // Frames still needed at the rate the full ones are filled (at least one); with no full
         // frame to go by yet, one more page.
         let want = held.checked_div(full).map_or(1, |per_frame| len.saturating_sub(at).div_ceil(per_frame.max(1))).clamp(1, max_pages - added);
-        let last = *d.story(sid).and_then(|s| s.frames.last()).ok_or_else(|| bad("file.place", "the story has no frame"))?;
+        let last = *d.story(sid).and_then(|s| s.frames.last()).ok_or_else(|| bad(cmd, "the story has no frame"))?;
         let mut page = d.page_of_item(last).unwrap_or(d.page_count().saturating_sub(1));
         let parent = d.page_loc(page).and_then(|(si, pi)| d.spreads[si].pages[pi].parent);
         d.insert_pages(Some(page), want, parent)?;
@@ -144,7 +150,7 @@ pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize) -> Resu
         let mut prev = last;
         for _ in 0..want {
             page += 1;
-            let (si, pi) = d.page_loc(page).ok_or_else(|| bad("file.place", "page insert failed"))?;
+            let (si, pi) = d.page_loc(page).ok_or_else(|| bad(cmd, "page insert failed"))?;
             let r = d.spreads[si].pages[pi].margin_rect();
             let (fid, _) = d.add_text_frame(SpreadRef::Doc(si), r, layer, "", ParaFormat::default())?;
             d.thread(prev, fid)?;
@@ -230,7 +236,7 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
             *sel = designcraft_doc::Selection::items(vec![fid]);
             sid
         };
-        let pages = if autoflow_on { autoflow(d, sid, 2000)? } else { 0 };
+        let pages = if autoflow_on { autoflow(d, sid, 2000, "file.place")? } else { 0 };
         let overset = fit(d, sid).0.is_some();
         Ok(json!({"story": sid.0, "pagesAdded": pages, "overset": overset, "warnings": warnings}))
     })

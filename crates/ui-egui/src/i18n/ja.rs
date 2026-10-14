@@ -945,7 +945,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Select a placed video or sound (File › Place a .mp4, .mov, .mp3, .wav …).",
         "配置した動画または音声を選択します (ファイル › 配置で .mp4、.mov、.mp3、.wav などを配置)。",
     ),
-    ("Select an object to color its fill or stroke.", "塗りや線にカラーを設定するオブジェクトを選択してください。"),
+    ("Select an object or text to color its fill or stroke.", "塗りや線にカラーを設定するオブジェクトまたはテキストを選択してください。"),
     ("Select an object to give its fill a gradient.", "塗りにグラデーションを適用するオブジェクトを選択してください。"),
     ("Select an object to make it a button.", "ボタンにするオブジェクトを選択します。"),
     (
@@ -1006,6 +1006,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cap Height", "大文字の高さ"),
     ("Leading", "行送り"),
     ("x Height", "x の高さ"),
+    ("Em Box Height", "仮想ボディの高さ"),
     ("Fixed", "固定"),
     ("Never (continuous)", "振り直しなし (通し番号)"),
     ("Page", "ページ"),

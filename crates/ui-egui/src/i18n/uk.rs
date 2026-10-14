@@ -950,7 +950,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Select a placed video or sound (File › Place a .mp4, .mov, .mp3, .wav …).",
         "Виділіть розміщене відео або звук («Файл» › «Розмістити» файл .mp4, .mov, .mp3, .wav …).",
     ),
-    ("Select an object to color its fill or stroke.", "Виділіть об’єкт, щоб змінити колір заливки або обведення."),
+    ("Select an object or text to color its fill or stroke.", "Виділіть об’єкт або текст, щоб змінити колір заливки або обведення."),
     ("Select an object to give its fill a gradient.", "Виділіть об’єкт, щоб застосувати градієнт до заливки."),
     ("Select an object to make it a button.", "Виділіть об’єкт, щоб перетворити його на кнопку."),
     (
@@ -1011,6 +1011,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cap Height", "Висота великих літер"),
     ("Leading", "Міжрядковий інтервал"),
     ("x Height", "Висота малих літер"),
+    ("Em Box Height", "Висота em-квадрата"),
     ("Fixed", "Фіксований"),
     ("Never (continuous)", "Ніколи (наскрізна нумерація)"),
     ("Page", "Сторінка"),

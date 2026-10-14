@@ -953,7 +953,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
         "Select a placed video or sound (File › Place a .mp4, .mov, .mp3, .wav …).",
         "Seleziona un video o un audio inserito (File › Inserisci un .mp4, .mov, .mp3, .wav …).",
     ),
-    ("Select an object to color its fill or stroke.", "Seleziona un oggetto per colorarne il riempimento o la traccia."),
+    ("Select an object or text to color its fill or stroke.", "Seleziona un oggetto o del testo per colorarne il riempimento o la traccia."),
     ("Select an object to give its fill a gradient.", "Seleziona un oggetto per applicare una sfumatura al suo riempimento."),
     ("Select an object to make it a button.", "Seleziona un oggetto per trasformarlo in pulsante."),
     (
@@ -1014,6 +1014,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cap Height", "Altezza maiuscole"),
     ("Leading", "Interlinea"),
     ("x Height", "Altezza x"),
+    ("Em Box Height", "Altezza riquadro em"),
     ("Fixed", "Fisso"),
     ("Never (continuous)", "Mai (continua)"),
     ("Page", "Pagina"),

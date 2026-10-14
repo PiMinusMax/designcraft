@@ -58,6 +58,11 @@ list (author, source, license) is in ASSETS.md.
   Shippori Mincho), under the SIL Open Font License 1.1. Their licence texts ship with the
   packages as OFL-<family>.txt. Builds without CRAFT_FONTS_DIR do not include them.
 - All UI icons are drawn in code (crates/ui-egui/src/icons.rs) and are original work, MIT OR Apache-2.0.
+- hayro PDF crates (placed PDFs): hayro, hayro-interpret, hayro-syntax and hayro-jbig2
+  (Apache-2.0 OR MIT) are pdfcraft's patched copies, fetched by git from its vendor/ directory at
+  the commit that Cargo.toml pins (https://github.com/storytold/pdfcraft, MIT OR Apache-2.0).
+  hayro-interpret embeds PDFium's Foxit standard-14 fonts under PDFium's BSD-style license
+  (vendor/hayro-interpret/assets/LICENSE_FOXIT) and a CMYK profile under CC0-1.0.
 
 Rust dependencies (vello_cpu, kurbo, skrifa, harfrust, image, egui, eframe, …) are permissively
 licensed (MIT/Apache-2.0/BSD/ISC/Zlib) and fetched through crates.io.

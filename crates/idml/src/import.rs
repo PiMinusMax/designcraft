@@ -253,9 +253,12 @@ fn parse_point(s: Option<&str>) -> Option<Point> {
     (v.len() >= 2).then(|| Point::new(v[0], v[1]))
 }
 
-/// IDML tint (percent, `-1` = default) → 0..1.
+/// InDesign's corner size where a file gives a corner shape without one.
+const INDESIGN_CORNER_SIZE: f64 = 12.0;
+
+/// IDML tint (percent; `-1` = the colour's own tint, 100 %) → 0..1.
 fn tint(v: Option<f64>) -> Option<f32> {
-    v.map(|t| if t < 0.0 { 1.0 } else { (t / 100.0) as f32 })
+    v.map(|t| if t < 0.0 || t.is_nan() { 1.0 } else { (t / 100.0).min(1.0) as f32 })
 }
 
 impl<'r> Importer<'r> {
@@ -788,10 +791,10 @@ impl<'r> Importer<'r> {
 
     /// A swatch reference (Self id) → our swatch name; unnamed colours become value-named swatches.
     /// A `TextFramePreference`, with its column rule colour resolved to a swatch.
-    fn frame_options(&mut self, e: &El) -> TextFrameOptions {
-        let mut o = text_frame_options(e);
-        if let Some(r) = e.get("ColumnRuleStrokeColor") {
-            o.column_rule_color = self.swatch_ref(r);
+    fn frame_options(&mut self, prefs: &[&El]) -> TextFrameOptions {
+        let mut o = text_frame_options(prefs);
+        if let Some(r) = Prefs(prefs).prop("ColumnRuleStrokeColor") {
+            o.column_rule_color = self.swatch_ref(&r);
         }
         o
     }
@@ -852,7 +855,7 @@ impl<'r> Importer<'r> {
             let name = e.get("Name").unwrap_or("").to_string();
             if !name.is_empty() && !name.starts_with("$ID/") && !self.lists.iter().any(|l| l.name == name) {
                 self.lists
-                    .push(designcraft_doc::NumberedList { name, continue_across_stories: e.get("ContinueNumbersAcrossStories") != Some("false") });
+                    .push(designcraft_doc::NumberedList { name, continue_across_stories: e.get("ContinueNumbersAcrossStories") == Some("true") });
             }
         }
         let mut paras: Vec<(String, El)> = Vec::new();
@@ -1000,7 +1003,7 @@ impl<'r> Importer<'r> {
                 .then(|| e.get("AppliedParagraphStyle").map(|r| self.para_style_ref(r)))
                 .flatten();
             let text_frame = if e.get("EnableTextFrameGeneralOptions") == Some("true") {
-                e.find("TextFramePreference").map(|t| self.frame_options(t))
+                e.find("TextFramePreference").map(|t| self.frame_options(&[t]))
             } else {
                 None
             };
@@ -1118,7 +1121,7 @@ impl<'r> Importer<'r> {
         o.span_columns = e.boolean("EnableStraddling").unwrap_or(false);
         o.rule.on = e.boolean("RuleOn").unwrap_or(true);
         o.rule.weight = e.num("RuleLineWeight").unwrap_or(1.0);
-        o.rule.tint = (e.num("RuleTint").unwrap_or(100.0) / 100.0).clamp(0.0, 1.0) as f32;
+        o.rule.tint = tint(e.num("RuleTint")).unwrap_or(1.0);
         o.rule.left_indent = e.num("RuleLeftIndent").unwrap_or(0.0);
         o.rule.width = e.num("RuleWidth").unwrap_or(72.0);
         o.rule.offset = e.num("RuleOffset").unwrap_or(0.0);
@@ -1202,7 +1205,7 @@ impl<'r> Importer<'r> {
             // An explicit Text Color resets an inherited swatch; absence still inherits.
             // Resolve the sentinel before swatch_ref, which maps unknown names to [None].
             let color = e.prop(&format!("{k}Color")).map(|r| if r.trim() == "Text Color" { String::new() } else { self.swatch_ref(r.trim()) });
-            let tint = e.num(&format!("{k}Tint")).filter(|v| *v >= 0.0).map(|v| (v / 100.0) as f32);
+            let tint = tint(e.num(&format!("{k}Tint")));
             if k == "Underline" {
                 a.underline_weight = num("Weight").map(Some);
                 a.underline_offset = num("Offset").map(Some);
@@ -1336,6 +1339,9 @@ impl<'r> Importer<'r> {
                     }
                 })
                 .collect();
+            // IDML has no drop cap style attribute: the drop cap's character style is the list's
+            // leading "through 1 Dropcap" nested style.
+            a.drop_cap_style = v.first().filter(|ns| ns.is_drop_cap()).map(|ns| ns.style.clone());
             a.nested_styles = Some(v);
         }
         if let Some(l) = e.prop_el("AllNestedLineStyles") {
@@ -1364,6 +1370,12 @@ impl<'r> Importer<'r> {
         a.space_after = e.num("SpaceAfter");
         a.drop_cap_lines = u("DropCapLines");
         a.drop_cap_chars = u("DropCapCharacters");
+        // DropcapDetail bits: 1 = Align Left Edge, 2 = Scale for Descenders.
+        if let Some(v) = e.num("DropcapDetail").filter(|v| v.is_finite() && *v >= 0.0) {
+            let bits = v as u32;
+            a.drop_cap_align_left = Some(bits & 1 != 0);
+            a.drop_cap_scale_descenders = Some(bits & 2 != 0);
+        }
         if let Some(g) = e.prop("GridAlignment") {
             a.grid_align = Some(if g == "None" {
                 GridAlign::None
@@ -1475,7 +1487,9 @@ impl<'r> Importer<'r> {
         }
         if let Some(c) = e.prop(&format!("{k}Color")) {
             let c = c.trim();
-            if c.contains('/') {
+            if c == designcraft_doc::TEXT_COLOR {
+                r.color = c.to_string();
+            } else if c.contains('/') {
                 r.color = self.swatch_ref(c);
             }
         }
@@ -2006,25 +2020,33 @@ impl<'r> Importer<'r> {
         })
     }
 
-    /// Resolve an item attribute, falling back to its object style chain.
-    fn attr_or_style(&self, e: &El, k: &str) -> Option<String> {
-        if let Some(v) = e.get(k) {
-            return Some(v.to_string());
-        }
+    /// An item's object style chain: its applied style, the styles that one is based on, then
+    /// `[None]` (cycle-safe).
+    fn object_style_chain(&self, e: &El) -> Vec<&El> {
+        let mut chain: Vec<&El> = Vec::new();
         let mut os = e.get("AppliedObjectStyle").map(str::to_string);
-        let mut depth = 0;
         while let Some(id) = os {
-            depth += 1;
-            if depth > 16 {
+            let Some(s) = self.object_els.get(&id) else { break };
+            if chain.len() >= 16 || chain.iter().any(|c| std::ptr::eq(*c, s)) {
                 break;
             }
-            let Some(s) = self.object_els.get(&id) else { break };
-            if let Some(v) = s.get(k) {
-                return Some(v.to_string());
-            }
-            os = s.prop("BasedOn").map(|b| if b.starts_with("ObjectStyle/") { b } else { format!("ObjectStyle/{}", names::escape_id(&b)) });
+            chain.push(s);
+            os = s.prop("BasedOn").map(|b| {
+                let b = b.trim();
+                if b.starts_with("ObjectStyle/") { b.to_string() } else { format!("ObjectStyle/{}", names::escape_id(b)) }
+            });
         }
-        None
+        if let Some(none) = self.object_els.get("ObjectStyle/$ID/[None]")
+            && !chain.iter().any(|c| std::ptr::eq(*c, none))
+        {
+            chain.push(none);
+        }
+        chain
+    }
+
+    /// Resolve an item attribute, falling back to its object style chain.
+    fn attr_or_style(&self, e: &El, k: &str) -> Option<String> {
+        e.get(k).or_else(|| self.object_style_chain(e).into_iter().find_map(|s| s.get(k))).map(str::to_string)
     }
 
     fn stroke_from(&mut self, e: &El, item: Option<&El>) -> Stroke {
@@ -2130,19 +2152,21 @@ impl<'r> Importer<'r> {
                 it.stroke.weight = 1.0;
             }
         }
-        // Corners.
-        let cn = crate::export::corner_names(&it.path);
-        // The legacy all-corners attributes apply only when no per-corner attribute is present.
-        let per_corner = cn.iter().any(|n| e.get(&format!("{n}CornerOption")).is_some());
-        let legacy = if per_corner { (None, None) } else { (e.get("CornerOption"), e.num("CornerRadius")) };
-        let mut corners = CornerOptions::default();
-        for (i, n) in cn.iter().enumerate() {
-            let shape = e.get(&format!("{n}CornerOption")).or(legacy.0).map(names::corner_in).unwrap_or_default();
-            let size = e.num(&format!("{n}CornerRadius")).or(legacy.1).unwrap_or(0.0);
-            corners.corners[i] = Corner { shape, size };
-        }
-        if !corners.is_none() {
-            it.corners = corners;
+        // Corners: each corner's shape and radius come from the item, then its object style chain;
+        // at each level a per-corner attribute wins over the legacy all-corners one.
+        if tag != "Group" {
+            let levels: Vec<&El> = std::iter::once(e).chain(self.object_style_chain(e)).collect();
+            let corner =
+                |n: &str, what: &str| levels.iter().find_map(|s| s.get(&format!("{n}Corner{what}")).or_else(|| s.get(&format!("Corner{what}"))));
+            let mut corners = CornerOptions::default();
+            for (i, n) in crate::export::corner_names(&it.path).iter().enumerate() {
+                let shape = corner(n, "Option").map(names::corner_in).unwrap_or_default();
+                let size = corner(n, "Radius").and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(INDESIGN_CORNER_SIZE);
+                corners.corners[i] = Corner { shape, size };
+            }
+            if !corners.is_none() {
+                it.corners = corners;
+            }
         }
         // Transparency.
         if let Some(t) = e.find("TransparencySetting") {
@@ -2227,7 +2251,13 @@ impl<'r> Importer<'r> {
                         sid
                     }
                 };
-                let mut options = e.find("TextFramePreference").map(|t| self.frame_options(t)).unwrap_or_default();
+                // Options the frame doesn't set come from its object style chain.
+                let prefs: Vec<&El> = std::iter::once(e).chain(self.object_style_chain(e)).filter_map(|s| s.find("TextFramePreference")).collect();
+                let mut options = text_frame_options(&prefs);
+                // `prefs` borrows the object styles, so the rule colour's swatch is resolved after it.
+                if let Some(r) = Prefs(&prefs).prop("ColumnRuleStrokeColor") {
+                    options.column_rule_color = self.swatch_ref(&r);
+                }
                 if let Some(g) = e.find("BaselineFrameGridOption")
                     && g.get("UseCustomBaselineFrameGrid") == Some("true")
                 {
@@ -2403,12 +2433,35 @@ impl<'r> Importer<'r> {
         self.spreads.iter().chain(self.parents.iter()).find_map(|s| find(&s.items, id))
     }
 
+    /// A nested style list replaces the one a style or paragraph inherits, and with it the drop
+    /// cap style (the list's leading "through 1 Dropcap" entry, read into the drop cap style). A
+    /// list of its own without that entry clears an inherited drop cap style.
+    fn clear_inherited_drop_cap_styles(&mut self) {
+        let clears = |a: &designcraft_doc::ParaAttrs| a.drop_cap_style.is_none() && a.nested_styles.is_some();
+        let cleared: Vec<String> = self
+            .styles
+            .paragraph
+            .iter()
+            .filter(|s| clears(&s.para) && inherits_drop_cap_style(&self.styles, s.based_on.as_deref()))
+            .map(|s| s.name.clone())
+            .collect();
+        for name in cleared {
+            if let Some(s) = self.styles.para_mut(&name) {
+                s.para.drop_cap_style = Some(st::NO_CHAR_STYLE.into());
+            }
+        }
+        for story in self.stories.values_mut() {
+            clear_story_drop_cap_styles(&self.styles, story, 0);
+        }
+    }
+
     fn finish(mut self, root: &El) -> Result<Document> {
         let title = root.get("Name").map(|n| n.trim_end_matches(".indd").to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Untitled".into());
         if self.spreads.is_empty() {
             return Err(IdmlError::Invalid("document has no spreads".into()));
         }
         self.settings.lists = std::mem::take(&mut self.lists);
+        self.clear_inherited_drop_cap_styles();
         // Make sure built-in paragraph styles exist and are first.
         let d = Document {
             title,
@@ -2525,24 +2578,26 @@ fn ace_char(v: &str) -> Option<char> {
 }
 
 fn margins_of(m: &El) -> (Margins, Columns) {
-    let g = |k: &str, d: f64| m.num(k).unwrap_or(d);
+    let g = |k: &str, d: f64| m.num(k).filter(|v| v.is_finite()).unwrap_or(d);
     (
         Margins { top: g("Top", 36.0), bottom: g("Bottom", 36.0), inside: g("Left", 36.0), outside: g("Right", 36.0) },
-        Columns { count: g("ColumnCount", 1.0).max(1.0) as u32, gutter: g("ColumnGutter", 12.0), positions: None },
+        Columns { count: g("ColumnCount", 1.0).clamp(1.0, 216.0) as u32, gutter: g("ColumnGutter", 12.0), positions: None },
     )
 }
 
-fn text_frame_options(e: &El) -> TextFrameOptions {
+/// Text Frame Options from `TextFramePreference` elements: each attribute from the first that sets it.
+fn text_frame_options(prefs: &[&El]) -> TextFrameOptions {
+    let e = Prefs(prefs);
     let mut o = TextFrameOptions::default();
     if let Some(v) = e.num("TextColumnCount") {
-        o.columns = v.max(1.0) as u32;
+        o.columns = v.clamp(1.0, 216.0) as u32;
     }
     if let Some(v) = e.num("TextColumnGutter") {
         o.gutter = v;
     }
-    o.columns_kind = if e.get("UseFixedColumnWidth") == Some("true") {
+    o.columns_kind = if e.prop("UseFixedColumnWidth").as_deref().map(str::trim) == Some("true") {
         ColumnsKind::FixedWidth
-    } else if e.get("UseFlexibleColumnWidth") == Some("true") {
+    } else if e.prop("UseFlexibleColumnWidth").as_deref().map(str::trim) == Some("true") {
         ColumnsKind::FlexibleWidth
     } else {
         ColumnsKind::FixedNumber
@@ -2552,31 +2607,33 @@ fn text_frame_options(e: &El) -> TextFrameOptions {
     {
         o.column_width = v;
     }
-    o.balance_columns = e.get("VerticalBalanceColumns") == Some("true");
-    if let Some(inset) = inset_spacing(e) {
+    o.balance_columns = e.prop("VerticalBalanceColumns").as_deref().map(str::trim) == Some("true");
+    if let Some(p) = prefs.iter().find(|p| p.prop("InsetSpacing").is_some())
+        && let Some(inset) = inset_spacing(p)
+    {
         o.inset = inset;
     }
-    if let Some(v) = e.get("VerticalJustification") {
-        o.vertical_justification = names::vj_in(v);
+    if let Some(v) = e.prop("VerticalJustification") {
+        o.vertical_justification = names::vj_in(v.trim());
     }
     if let Some(v) = e.num("VerticalThreshold") {
         o.vj_paragraph_spacing_limit = v;
     }
-    if let Some(v) = e.get("FirstBaselineOffset") {
-        o.first_baseline = names::first_baseline_in(v);
+    if let Some(v) = e.prop("FirstBaselineOffset") {
+        o.first_baseline = names::first_baseline_in(v.trim());
     }
     if let Some(v) = e.num("MinimumFirstBaselineOffset") {
         o.first_baseline_min = v;
     }
-    o.ignore_wrap = e.get("IgnoreWrap") == Some("true");
-    if let Some(v) = e.get("AutoSizingType") {
-        o.auto_size = names::auto_size_in(v);
+    o.ignore_wrap = e.prop("IgnoreWrap").as_deref().map(str::trim) == Some("true");
+    if let Some(v) = e.prop("AutoSizingType") {
+        o.auto_size = names::auto_size_in(v.trim());
     }
-    if let Some(v) = e.get("AutoSizingReferencePoint") {
-        o.auto_size_ref = names::REF_POINTS.iter().position(|p| *p == v).unwrap_or(1) as u8;
+    if let Some(v) = e.prop("AutoSizingReferencePoint") {
+        o.auto_size_ref = names::REF_POINTS.iter().position(|p| *p == v.trim()).unwrap_or(1) as u8;
     }
     // Column rules (the colour is a swatch reference: see `Importer::frame_options`).
-    o.column_rule = e.get("ColumnRuleOverride") == Some("true");
+    o.column_rule = e.prop("ColumnRuleOverride").as_deref().map(str::trim) == Some("true");
     let finite = |k: &str| e.num(k).filter(|v| v.is_finite());
     if let Some(v) = finite("ColumnRuleStrokeWidth") {
         o.column_rule_weight = v.clamp(0.0, 1000.0);
@@ -2594,6 +2651,60 @@ fn text_frame_options(e: &El) -> TextFrameOptions {
         }
     }
     o
+}
+
+/// Deepest table-in-cell or note nesting the drop cap pass walks into.
+const MAX_STORY_NESTING: usize = 32;
+
+/// [`Importer::clear_inherited_drop_cap_styles`] for one story's paragraphs and those of the table
+/// cells, footnotes and endnotes in it.
+fn clear_story_drop_cap_styles(styles: &Styles, story: &mut Story, depth: usize) {
+    for p in &mut story.paras {
+        if p.para.drop_cap_style.is_none() && p.para.nested_styles.is_some() && inherits_drop_cap_style(styles, Some(&p.style)) {
+            p.para.drop_cap_style = Some(st::NO_CHAR_STYLE.into());
+        }
+    }
+    if depth >= MAX_STORY_NESTING {
+        return;
+    }
+    for table in story.tables.values_mut() {
+        for cell in &mut Arc::make_mut(table).cells {
+            clear_story_drop_cap_styles(styles, &mut cell.text, depth + 1);
+        }
+    }
+    for note in story.notes.iter_mut().chain(story.endnotes.iter_mut()) {
+        clear_story_drop_cap_styles(styles, &mut Arc::make_mut(note).text, depth + 1);
+    }
+}
+
+/// Does paragraph style `name` (and its based-on chain) set a drop cap character style? A style
+/// with a nested style list of its own and no drop cap style has none.
+fn inherits_drop_cap_style<'a>(styles: &'a Styles, mut name: Option<&'a str>) -> bool {
+    let mut seen = HashSet::new();
+    while let Some(n) = name {
+        let Some(s) = styles.para(n).filter(|_| seen.insert(n)) else { break };
+        if let Some(c) = s.para.drop_cap_style.as_deref() {
+            return !c.is_empty() && c != st::NO_CHAR_STYLE;
+        }
+        if s.para.nested_styles.is_some() {
+            return false;
+        }
+        name = s.based_on.as_deref();
+    }
+    false
+}
+
+/// Property lookup over preference levels: the nearest level wins, attributes before children.
+struct Prefs<'a>(&'a [&'a El]);
+
+impl Prefs<'_> {
+    fn prop(&self, k: &str) -> Option<String> {
+        self.0.iter().find_map(|e| e.prop(k))
+    }
+    fn num(&self, k: &str) -> Option<f64> {
+        // The nearest preference wins; within it, attributes precede property children.
+        self.prop(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite())
+    }
 }
 
 /// A scalar applies to every edge; a list is top, left, bottom, right. Keep the
@@ -2651,4 +2762,245 @@ pub(crate) fn uri_to_path(uri: &str) -> String {
         _ => rest,
     };
     percent_decode(rest)
+}
+
+#[cfg(test)]
+mod numeric_property_tests {
+    use super::*;
+
+    fn pref(attrs: &[(&str, &str)], props: &[(&str, &str)]) -> El {
+        let mut e = El::new("TextFramePreference");
+        for (key, value) in attrs {
+            e.set(key, *value);
+        }
+        let mut p = El::new("Properties");
+        for (key, value) in props {
+            p.push(El::new(key).text(*value));
+        }
+        e.push(p);
+        e
+    }
+
+    #[test]
+    fn numeric_property_forms_import_every_frame_option() {
+        let local = pref(
+            &[("UseFixedColumnWidth", "true")],
+            &[
+                ("TextColumnCount", "3"),
+                ("TextColumnGutter", "17"),
+                ("TextColumnFixedWidth", "123"),
+                ("VerticalThreshold", "19"),
+                ("MinimumFirstBaselineOffset", "8"),
+                ("ColumnRuleStrokeWidth", "2"),
+                ("ColumnRuleStrokeTint", "25"),
+                ("ColumnRuleOffset", "3"),
+                ("ColumnRuleTopInset", "4"),
+                ("ColumnRuleBottomInset", "5"),
+            ],
+        );
+        let o = text_frame_options(&[&local]);
+        assert_eq!((o.columns, o.gutter, o.column_width), (3, 17., 123.));
+        assert_eq!((o.vj_paragraph_spacing_limit, o.first_baseline_min), (19., 8.));
+        assert_eq!(
+            (o.column_rule_weight, o.column_rule_tint, o.column_rule_offset, o.column_rule_top_inset, o.column_rule_bottom_inset),
+            (2., 0.25, 3., 4., 5.)
+        );
+    }
+
+    #[test]
+    fn numeric_property_precedence_is_nearest_level_then_attribute() {
+        let local = pref(&[("TextColumnCount", "4")], &[("TextColumnCount", "5"), ("TextColumnGutter", "17")]);
+        let child = pref(
+            &[("TextColumnGutter", "90"), ("MinimumFirstBaselineOffset", "8")],
+            &[("MinimumFirstBaselineOffset", "9"), ("VerticalThreshold", "19")],
+        );
+        let base = pref(&[("VerticalThreshold", "99")], &[("ColumnRuleStrokeWidth", "2")]);
+        let o = text_frame_options(&[&local, &child, &base]);
+        assert_eq!((o.columns, o.gutter, o.first_baseline_min, o.vj_paragraph_spacing_limit, o.column_rule_weight), (4, 17., 8., 19., 2.));
+        // An explicit invalid value still masks inherited values, as attribute lookup did.
+        let invalid = pref(&[("TextColumnCount", "bad")], &[("TextColumnCount", "6")]);
+        assert_eq!(text_frame_options(&[&invalid, &local]).columns, TextFrameOptions::default().columns);
+    }
+}
+
+#[cfg(test)]
+mod frame_preference_safety_tests {
+    use super::*;
+
+    fn pref(attrs: &[(&str, &str)], props: &[(&str, &str)]) -> El {
+        let mut e = El::new("TextFramePreference");
+        for (key, value) in attrs {
+            e.set(key, *value);
+        }
+        let mut p = El::new("Properties");
+        for (key, value) in props {
+            p.push(El::new(key).text(*value));
+        }
+        e.push(p);
+        e
+    }
+
+    #[test]
+    fn frame_preference_nonfinite_numbers_keep_finite_defaults() {
+        const KEYS: [&str; 10] = [
+            "TextColumnCount",
+            "TextColumnGutter",
+            "TextColumnFixedWidth",
+            "VerticalThreshold",
+            "MinimumFirstBaselineOffset",
+            "ColumnRuleStrokeWidth",
+            "ColumnRuleStrokeTint",
+            "ColumnRuleOffset",
+            "ColumnRuleTopInset",
+            "ColumnRuleBottomInset",
+        ];
+        let fallback = pref(&[("UseFixedColumnWidth", "true")], &[]);
+        let expected = text_frame_options(&[&fallback]);
+        for value in ["NaN", "inf", "-inf", "1e309"] {
+            for attribute in [true, false] {
+                let values: Vec<_> = KEYS.iter().map(|key| (*key, value)).collect();
+                let mut invalid = if attribute { pref(&values, &[]) } else { pref(&[], &values) };
+                invalid.set("UseFixedColumnWidth", "true");
+                let inherited = pref(&[], &[("TextColumnCount", "7"), ("TextColumnGutter", "9")]);
+                assert_eq!(text_frame_options(&[&invalid, &inherited]), expected, "{value}, attribute={attribute}");
+            }
+        }
+    }
+
+    #[test]
+    fn frame_preference_property_booleans_enums_and_precedence() {
+        let base = pref(
+            &[
+                ("UseFixedColumnWidth", "true"),
+                ("UseFlexibleColumnWidth", "false"),
+                ("VerticalBalanceColumns", "false"),
+                ("IgnoreWrap", "false"),
+                ("ColumnRuleOverride", "false"),
+                ("VerticalJustification", "TopAlign"),
+                ("FirstBaselineOffset", "AscentOffset"),
+                ("AutoSizingType", "Off"),
+                ("AutoSizingReferencePoint", "TopCenterPoint"),
+            ],
+            &[],
+        );
+        let local = pref(
+            &[],
+            &[
+                ("UseFixedColumnWidth", "false"),
+                ("UseFlexibleColumnWidth", "true"),
+                ("VerticalBalanceColumns", "true"),
+                ("IgnoreWrap", "true"),
+                ("ColumnRuleOverride", "true"),
+                ("VerticalJustification", "BottomAlign"),
+                ("FirstBaselineOffset", "FixedHeight"),
+                ("AutoSizingType", "HeightAndWidth"),
+                ("AutoSizingReferencePoint", "BottomRightPoint"),
+            ],
+        );
+        let o = text_frame_options(&[&local, &base]);
+        assert_eq!(o.columns_kind, ColumnsKind::FlexibleWidth);
+        assert!(o.balance_columns && o.ignore_wrap && o.column_rule);
+        assert_eq!(o.vertical_justification, designcraft_doc::VerticalJustification::Bottom);
+        assert_eq!(o.first_baseline, designcraft_doc::FirstBaseline::Fixed);
+        assert_eq!(o.auto_size, designcraft_doc::AutoSize::HeightAndWidth);
+        assert_eq!(o.auto_size_ref, 8);
+        let fixed = pref(&[], &[("UseFixedColumnWidth", "true")]);
+        assert_eq!(text_frame_options(&[&fixed, &local, &base]).columns_kind, ColumnsKind::FixedWidth);
+        // At one level an attribute wins over a conflicting property child, for every key.
+        let mut same_level = local.clone();
+        for (key, value) in &base.attrs {
+            same_level.set(key, value);
+        }
+        assert_eq!(text_frame_options(&[&same_level, &local]), text_frame_options(&[&base]));
+        // Malformed nearer values mask ancestors and use the normal per-field fallback.
+        let mut malformed = El::new("TextFramePreference");
+        for (key, _) in &base.attrs {
+            malformed.set(key, "invalid");
+        }
+        assert_eq!(text_frame_options(&[&malformed, &local]), TextFrameOptions { auto_size_ref: 1, ..Default::default() });
+    }
+}
+
+#[cfg(test)]
+mod page_column_import_safety_tests {
+    use super::*;
+
+    #[test]
+    fn frame_preference_page_columns_are_bounded_and_finite() {
+        for (raw, expected) in [("4000000000", 216), ("1e300", 216), ("-10", 1), ("NaN", 1), ("inf", 1)] {
+            let m = El::new("MarginPreference")
+                .attr("ColumnCount", raw)
+                .attr("ColumnGutter", "NaN")
+                .attr("Top", "inf")
+                .attr("Bottom", "-inf")
+                .attr("Left", "NaN")
+                .attr("Right", "1e309");
+            let (margins, columns) = margins_of(&m);
+            assert_eq!(columns.count, expected);
+            assert_eq!(columns.gutter, 12.);
+            assert_eq!(margins, Margins::uniform(36.));
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_preference_scalar_tests {
+    use super::*;
+
+    #[test]
+    fn frame_preference_scalar_whitespace() {
+        let values = [
+            ("UseFixedColumnWidth", "true"),
+            ("UseFlexibleColumnWidth", "false"),
+            ("VerticalBalanceColumns", "true"),
+            ("IgnoreWrap", "true"),
+            ("ColumnRuleOverride", "true"),
+            ("VerticalJustification", "BottomAlign"),
+            ("FirstBaselineOffset", "FixedHeight"),
+            ("AutoSizingType", "HeightAndWidth"),
+            ("AutoSizingReferencePoint", "BottomRightPoint"),
+        ];
+        let preference = |properties: bool, padded: bool, fixed: bool| {
+            let mut e = El::new("TextFramePreference");
+            let mut props = El::new("Properties");
+            for (key, raw) in values {
+                let raw = match key {
+                    "UseFixedColumnWidth" if !fixed => "false",
+                    "UseFlexibleColumnWidth" if !fixed => "true",
+                    _ => raw,
+                };
+                let value = if padded { format!("\n  {raw}\t ") } else { raw.to_string() };
+                if properties {
+                    props.push(El::new(key).text(value));
+                } else {
+                    e.set(key, value);
+                }
+            }
+            e.push(props);
+            e
+        };
+        for fixed in [false, true] {
+            let clean = preference(false, false, fixed);
+            let expected = text_frame_options(&[&clean]);
+            assert_eq!(expected.columns_kind, if fixed { ColumnsKind::FixedWidth } else { ColumnsKind::FlexibleWidth });
+            assert!(expected.balance_columns && expected.ignore_wrap && expected.column_rule);
+            assert_eq!(expected.vertical_justification, designcraft_doc::VerticalJustification::Bottom);
+            assert_eq!(expected.first_baseline, designcraft_doc::FirstBaseline::Fixed);
+            assert_eq!(expected.auto_size, designcraft_doc::AutoSize::HeightAndWidth);
+            assert_eq!(expected.auto_size_ref, 8);
+            for properties in [false, true] {
+                let padded = preference(properties, true, fixed);
+                assert_eq!(text_frame_options(&[&padded]), expected);
+            }
+            // A malformed nearest attribute masks both its own valid child and farther values.
+            let mut invalid = preference(true, true, fixed);
+            for (key, _) in values {
+                invalid.set(key, " invalid ");
+            }
+            assert_eq!(text_frame_options(&[&invalid, &clean]), TextFrameOptions { auto_size_ref: 1, ..Default::default() });
+        }
+        // Object identities use the raw property lookup, not scalar whitespace normalization.
+        let exact = El::new("TextFramePreference").child(El::new("Properties").child(El::new("ColumnRuleStrokeColor").text(" Color/Named ")));
+        assert_eq!(Prefs(&[&exact]).prop("ColumnRuleStrokeColor").as_deref(), Some(" Color/Named "));
+    }
 }

@@ -140,6 +140,10 @@ pub fn natural_size(bytes: &[u8]) -> Option<(f64, f64)> {
         let s = svg_tree(bytes)?.size();
         return Some((s.width() as f64 * PT_PER_PX, s.height() as f64 * PT_PER_PX));
     }
+    if is_eps(bytes) {
+        let bb = eps::bounding_box(bytes)?;
+        return Some((bb[2] - bb[0], bb[3] - bb[1])).filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0);
+    }
     let (w, h) = pixel_size(bytes)?;
     Some((w as f64, h as f64))
 }
@@ -158,6 +162,11 @@ pub fn pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
 pub fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     if is_psd(bytes) {
         return psd::decode(bytes);
+    }
+    // An EPS is drawn as its proxy (preview, simple PostScript or placeholder); the document
+    // keeps the EPS itself.
+    if is_eps(bytes) {
+        return decode_rgba(&eps_proxy(bytes)?.0);
     }
     Some(decode_to_rgba8(&image::load_from_memory(bytes).ok()?))
 }
@@ -384,6 +393,19 @@ mod tests {
         }
         img.write_data(px).unwrap();
         b
+    }
+
+    /// A placed EPS is measured by its bounding box in points and drawn through its proxy; the
+    /// bytes stay the EPS.
+    #[test]
+    fn eps_draws_through_its_proxy_at_its_bounding_box_size() {
+        let eps =
+            b"%!PS-Adobe-3.1 EPSF-3.0\n%%BoundingBox: 0 0 4 2\n%%EndComments\n/rf { rectfill } bind def\n0 0 0 1 setcmykcolor\n0 0 2 2 rf\n%%EOF\n";
+        assert_eq!(natural_size(eps), Some((4.0, 2.0)));
+        let img = decode_rgba(eps).expect("drawn");
+        assert_eq!(img.dimensions(), (32, 16));
+        assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0, 255], "the rectangle");
+        assert_eq!(img.get_pixel(30, 1).0[3], 0, "outside it, transparent");
     }
 
     /// CMYK TIFFs read back as their ink values; RGB ones aren't CMYK.

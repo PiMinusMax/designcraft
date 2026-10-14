@@ -6,19 +6,21 @@
 //!   the ones the document references (see [`Document::compact_assets`])
 //! - `meta.json`: format version and generator
 //!
-//! Older single-file JSON documents (assets as base64 in `assetData`) still open.
+//! Older single-file JSON documents (assets as base64 in `assetData`) still open. Documents
+//! from older format versions are upgraded on load so they lay out as they did.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
-use designcraft_doc::{AssetId, Document};
+use designcraft_doc::{AssetId, Document, ParaAttrs, Story};
 use serde_json::{Value, json};
 
 pub const MIME: &str = "application/vnd.designcraft+zip";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FormatError {
@@ -93,26 +95,27 @@ fn load_zip(bytes: &[u8]) -> Result<Document, FormatError> {
         f.read_to_end(&mut v).ok()?;
         Some(v)
     };
-    if let Some(meta) = read(&mut z, "meta.json")
-        && let Ok(m) = serde_json::from_slice::<Value>(&meta)
-        && let Some(v) = m.get("version").and_then(Value::as_u64)
-        && v as u32 > VERSION
-    {
-        return Err(FormatError::TooNew(v as u32));
+    let version = read(&mut z, "meta.json")
+        .and_then(|meta| serde_json::from_slice::<Value>(&meta).ok())
+        .and_then(|m| m.get("version").and_then(Value::as_u64))
+        .map_or(1, |v| u32::try_from(v).unwrap_or(u32::MAX));
+    if version > VERSION {
+        return Err(FormatError::TooNew(version));
     }
     let json = read(&mut z, "document.json").ok_or_else(|| FormatError::NotOurs("missing document.json".into()))?;
     let mut v: Value = serde_json::from_slice(&json).map_err(|e| FormatError::NotOurs(e.to_string()))?;
-    upgrade(&mut v);
+    upgrade_json(&mut v);
     let mut doc: Document = serde_json::from_value(v).map_err(|e| FormatError::NotOurs(e.to_string()))?;
     let names: Vec<String> = z.file_names().map(str::to_string).collect();
     // Files saved with one copy per placement: identical copies share one buffer as they are
     // read, so memory holds each distinct file once.
-    let mut loaded: HashMap<usize, Vec<Arc<Vec<u8>>>> = HashMap::new();
+    let fingerprint = std::collections::hash_map::RandomState::new();
+    let mut loaded: HashMap<u64, Vec<Arc<Vec<u8>>>> = HashMap::new();
     for name in names {
         let Some(stem) = name.strip_prefix("assets/") else { continue };
         let Some(id) = stem.split('.').next().and_then(|s| s.parse::<u64>().ok()) else { continue };
         if let (Some(data), Some(a)) = (read(&mut z, &name), doc.assets.get_mut(&AssetId(id))) {
-            let same = loaded.entry(data.len()).or_default();
+            let same = loaded.entry(fingerprint.hash_one(data.as_slice())).or_default();
             let data = match same.iter().find(|d| ***d == data) {
                 Some(d) => d.clone(),
                 None => {
@@ -124,14 +127,62 @@ fn load_zip(bytes: &[u8]) -> Result<Document, FormatError> {
             Arc::make_mut(a).data = data;
         }
     }
+    upgrade(&mut doc, version);
     doc.merge_duplicate_assets();
     doc.check().map_err(|e| FormatError::NotOurs(e.to_string()))?;
     Ok(doc)
 }
 
+/// Bring a document saved in format `from` up to [`VERSION`].
+fn upgrade(doc: &mut Document, from: u32) {
+    if from < 2 {
+        // Format 1 laid out an unset Keep Lines Together mode as all lines in paragraph, and drop
+        // caps without Align Left Edge.
+        pin_para_default(doc, |a| &mut a.keep_all_lines, true);
+        pin_para_default(doc, |a| &mut a.drop_cap_align_left, false);
+    }
+}
+
+/// Pin a paragraph attribute to the value an older format resolved it to where nothing set it:
+/// at the start of each paragraph style chain that leaves it unset, and on paragraphs whose style
+/// is missing.
+fn pin_para_default<T: Clone>(doc: &mut Document, field: fn(&mut ParaAttrs) -> &mut Option<T>, old: T) {
+    let unset = |a: &ParaAttrs| field(&mut a.clone()).is_none();
+    let roots: std::collections::HashSet<String> = doc
+        .styles
+        .paragraph
+        .iter()
+        .filter_map(|s| {
+            let chain = doc.styles.para_chain(&s.name);
+            if chain.iter().all(|c| unset(&c.para)) { chain.first().map(|c| c.name.clone()) } else { None }
+        })
+        .collect();
+    if !roots.is_empty() {
+        for s in doc.styles_mut().paragraph.iter_mut().filter(|s| roots.contains(&s.name)) {
+            *field(&mut s.para) = Some(old.clone());
+        }
+    }
+    let styles = doc.styles.clone();
+    let mut pin = |st: &mut Story| {
+        for p in st.paras.iter_mut().filter(|p| styles.para(&p.style).is_none()) {
+            let v = field(&mut p.para);
+            if v.is_none() {
+                *v = Some(old.clone());
+            }
+        }
+    };
+    for st in doc.stories.values_mut() {
+        let st = Arc::make_mut(st);
+        st.for_each_text_mut(&mut pin);
+        for n in &mut st.endnotes {
+            Arc::make_mut(n).text.for_each_text_mut(&mut pin);
+        }
+    }
+}
+
 fn load_legacy_json(bytes: &[u8]) -> Result<Document, FormatError> {
     let mut v: Value = serde_json::from_slice(bytes).map_err(|e| FormatError::NotOurs(e.to_string()))?;
-    upgrade(&mut v);
+    upgrade_json(&mut v);
     let mut doc: Document = serde_json::from_value(v.clone()).map_err(|e| FormatError::NotOurs(e.to_string()))?;
     if let Some(data) = v.get("assetData").and_then(Value::as_object) {
         for (k, s) in data {
@@ -142,6 +193,7 @@ fn load_legacy_json(bytes: &[u8]) -> Result<Document, FormatError> {
             }
         }
     }
+    upgrade(&mut doc, 1);
     doc.merge_duplicate_assets();
     doc.check().map_err(|e| FormatError::NotOurs(e.to_string()))?;
     Ok(doc)
@@ -150,7 +202,7 @@ fn load_legacy_json(bytes: &[u8]) -> Result<Document, FormatError> {
 /// Bring older documents' JSON up to the current model. Vertical Type was a text frame option
 /// (`content.options.vertical`); it is the story's direction, which a story takes from its first
 /// frame.
-fn upgrade(doc: &mut Value) {
+fn upgrade_json(doc: &mut Value) {
     let mut vertical = HashSet::new();
     vertical_frames(doc, &mut vertical, 0);
     if vertical.is_empty() {
@@ -293,6 +345,122 @@ mod tests {
         assert_eq!(back.stories, d.stories);
     }
 
+    /// `doc` as format 1 wrote it.
+    fn save_v1(doc: &Document) -> Vec<u8> {
+        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        z.start_file("meta.json", zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(br#"{"format": "designcraft", "version": 1}"#).unwrap();
+        z.start_file("document.json", zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(&serde_json::to_vec(doc).unwrap()).unwrap();
+        z.finish().unwrap().into_inner()
+    }
+
+    fn para_style(name: &str, based_on: Option<&str>, keep_all_lines: Option<bool>) -> designcraft_doc::ParagraphStyle {
+        designcraft_doc::ParagraphStyle {
+            name: name.into(),
+            based_on: based_on.map(str::to_string),
+            next_style: None,
+            para: designcraft_doc::ParaAttrs { keep_lines_together: Some(true), keep_all_lines, ..Default::default() },
+            chars: Default::default(),
+            shortcut: String::new(),
+        }
+    }
+
+    /// Format 1 resolved an unset Keep Lines Together mode as all lines: those documents still
+    /// do after loading, wherever the mode comes from. New documents keep lines at start/end.
+    #[test]
+    fn format_1_keep_lines_without_mode_stays_all_lines() {
+        let mut d = Document::new(&NewDocument::default());
+        let st = d.styles_mut();
+        st.paragraph.push(para_style("Root", None, None));
+        st.paragraph.push(para_style("Child", Some("Root"), None));
+        st.paragraph.push(para_style("Explicit", None, Some(false)));
+        st.paragraph.push(para_style("Under explicit", Some("Explicit"), None));
+        st.paragraph.push(para_style("Loop A", Some("Loop B"), None));
+        st.paragraph.push(para_style("Loop B", Some("Loop A"), None));
+        let lid = d.default_layer();
+        let names = [designcraft_doc::story::BASIC_PARAGRAPH, "Root", "Child", "Explicit", "Under explicit", "Loop A", "Loop B", "Missing"];
+        let text = names.join("\n");
+        let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(10.0, 10.0, 200.0, 200.0), lid, &text, ParaFormat::default()).unwrap();
+        {
+            let s = d.story_mut(sid).unwrap();
+            for (p, name) in s.paras.iter_mut().zip(names) {
+                p.style = name.into();
+                p.para.keep_lines_together = Some(true);
+            }
+            s.insert_note(1, "Note", ParaFormat { style: "Missing".into(), ..Default::default() });
+        }
+        let back = load(&save_v1(&d)).unwrap();
+        let resolve = |f: &ParaFormat| back.styles.resolve_para(f).0;
+        let story = back.story(sid).unwrap();
+        for (p, name) in story.paras.iter().zip(names) {
+            let pp = resolve(p);
+            assert!(pp.keep_lines_together);
+            assert_eq!(pp.keep_all_lines, !name.contains("xplicit"), "{name}");
+        }
+        assert!(resolve(&story.notes[0].text.paras[0]).keep_all_lines, "footnote with a missing style");
+        assert!(back.styles.resolve_para_style("Loop A").0.keep_all_lines && back.styles.resolve_para_style("Loop B").0.keep_all_lines);
+        // Pinned where the chains start; explicit and inheriting styles are left as they were.
+        assert_eq!(back.styles.para("Root").unwrap().para.keep_all_lines, Some(true));
+        assert_eq!(back.styles.para("Child").unwrap().para.keep_all_lines, None);
+        assert_eq!(back.styles.para("Under explicit").unwrap().para.keep_all_lines, None);
+        // The current format keeps the new default: at start/end of paragraph.
+        let now = load(&save(&d).unwrap()).unwrap();
+        let p = &now.story(sid).unwrap().paras[0];
+        assert!(!now.styles.resolve_para(p).0.keep_all_lines);
+        assert!(!designcraft_doc::ParaProps::default().keep_all_lines);
+    }
+
+    /// Format 1 wrote paragraph rules, text frame options and numbered lists in full, so their
+    /// old defaults (black rules, auto-size from the top centre, lists continuing across stories)
+    /// load as saved. New documents take InDesign's.
+    #[test]
+    fn format_1_rules_frames_and_lists_load_as_saved() {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let old_rule = designcraft_doc::Rule { on: true, color: designcraft_doc::color::swatch::BLACK.into(), ..Default::default() };
+        let (fid, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(10.0, 10.0, 200.0, 200.0), lid, "Ruled", ParaFormat::default()).unwrap();
+        d.story_mut(sid).unwrap().paras[0].para.rule_above = Some(old_rule.clone());
+        d.item_mut(fid).unwrap().text_frame_mut().unwrap().options.auto_size_ref = 1;
+        d.settings.lists.push(designcraft_doc::NumberedList { name: "Steps".into(), continue_across_stories: true });
+        let back = load(&save_v1(&d)).unwrap();
+        assert_eq!(back.story(sid).unwrap().paras[0].para.rule_above, Some(old_rule));
+        assert_eq!(back.item(fid).unwrap().text_frame().unwrap().options.auto_size_ref, 1);
+        assert!(back.settings.lists[0].continue_across_stories);
+        assert_eq!(designcraft_doc::Rule::default().color, designcraft_doc::TEXT_COLOR);
+        assert_eq!(designcraft_doc::TextFrameOptions::default().auto_size_ref, 4);
+        assert!(!designcraft_doc::NumberedList::default().continue_across_stories);
+    }
+
+    /// Format 1 set drop caps without Align Left Edge: those documents still do where nothing set
+    /// it. New documents align the drop cap's left edge.
+    #[test]
+    fn format_1_drop_caps_stay_unaligned() {
+        let mut d = Document::new(&NewDocument::default());
+        let st = d.styles_mut();
+        st.paragraph.push(para_style("Opener", None, None));
+        st.paragraph.push(designcraft_doc::ParagraphStyle {
+            para: designcraft_doc::ParaAttrs { drop_cap_align_left: Some(true), ..Default::default() },
+            ..para_style("Aligned", None, None)
+        });
+        let lid = d.default_layer();
+        let (_, sid) =
+            d.add_text_frame(SpreadRef::Doc(0), Rect::new(10.0, 10.0, 200.0, 200.0), lid, "One\nTwo\nThree", ParaFormat::default()).unwrap();
+        {
+            let s = d.story_mut(sid).unwrap();
+            for (p, name) in s.paras.iter_mut().zip(["Opener", "Aligned", "Missing"]) {
+                p.style = name.into();
+                p.para.drop_cap_lines = Some(2);
+                p.para.drop_cap_chars = Some(1);
+            }
+        }
+        let back = load(&save_v1(&d)).unwrap();
+        let aligned: Vec<bool> = back.story(sid).unwrap().paras.iter().map(|p| back.styles.resolve_para(p).0.drop_cap_align_left).collect();
+        assert_eq!(aligned, [false, true, false]);
+        let now = load(&save(&d).unwrap()).unwrap();
+        assert!(now.styles.resolve_para(&now.story(sid).unwrap().paras[0]).0.drop_cap_align_left);
+    }
+
     #[test]
     fn saves_hold_each_used_file_once() {
         let mut d = Document::new(&NewDocument::default());
@@ -336,6 +504,33 @@ mod tests {
                 .collect();
             assert_eq!(links, [Some("/p/a.png"), Some("/q/b.png"), None]);
         }
+    }
+
+    #[test]
+    fn equal_size_archive_assets_preserve_content_and_share_only_identical_buffers() {
+        let mut d = Document::new(&NewDocument::default());
+        let mut pairs = Vec::new();
+        for n in 0..128u64 {
+            let mut bytes = vec![42; 1024];
+            bytes[1016..].copy_from_slice(&n.to_le_bytes());
+            let a = png_asset(&mut d, &bytes);
+            let b = png_asset(&mut d, &bytes);
+            // Distinct links must remain independently relinkable even when their bytes match.
+            Arc::make_mut(d.assets.get_mut(&a).unwrap()).link = Some(format!("/a/{n}.png"));
+            Arc::make_mut(d.assets.get_mut(&b).unwrap()).link = Some(format!("/b/{n}.png"));
+            place(&mut d, a, 1.0);
+            place(&mut d, b, 2.0);
+            pairs.push((a, b));
+        }
+        let back = load(&save_uncompacted(&d)).unwrap();
+        assert_eq!(back.assets.len(), 256);
+        for (n, (a, b)) in pairs.into_iter().enumerate() {
+            assert_eq!(back.assets[&a].data[1016..], (n as u64).to_le_bytes());
+            assert!(Arc::ptr_eq(&back.assets[&a].data, &back.assets[&b].data));
+            assert_eq!(back.assets[&a].link, d.assets[&a].link);
+            assert_eq!(back.assets[&b].link, d.assets[&b].link);
+        }
+        assert_eq!(back.spreads, d.spreads);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Vertical metrics for upright glyphs in vertical text: advances down the line (`vmtx`), vertical
 //! origins (`VORG`, else `vmtx` and the glyph's top) and the ideographic em box (`BASE`, else
-//! OS/2). Fonts without them fall back to the em box: one em down the line, the origin at its top.
+//! OS/2 metrics). Fonts without them fall back to the em box: one em down the line, the origin at its top.
 
 use skrifa::instance::Size;
 use skrifa::metrics::GlyphMetrics;
@@ -53,25 +53,30 @@ impl<'a> VMetrics<'a> {
     }
 }
 
-/// The ideographic em box (top, bottom) in font units, y up: `BASE` `idtp`/`ideo`, else the OS/2
-/// typo ascender and descender, else the ascender and descender; the last two centred on one em.
-pub(crate) fn em_box(face: &FontFace) -> (f64, f64) {
+/// The ideographic em box (top, bottom) in font units, y up, one em tall: `BASE` `idtp`/`ideo`;
+/// else, for a CJK font (its [`crate::FontGroup`] isn't Western), topped by the OS/2 typo ascender
+/// when the typo ascender and descender span exactly one em; else centred on half the cap height
+/// (OS/2 `sCapHeight`, else the `H` glyph's top); else 0.88 em above the baseline. The flag is
+/// false for that last fallback.
+pub(crate) fn em_box(face: &FontFace) -> ((f64, f64), bool) {
     let upem = face.upem;
-    let font = face.skrifa();
-    if let Some(b) = font.as_ref().and_then(|f| base_em_box(f, upem)) {
-        return b;
+    let fallback = ((upem * 0.88, upem * -0.12), false);
+    let Some(font) = face.skrifa() else { return fallback };
+    if let Some(b) = base_em_box(&font, upem) {
+        return (b, true);
     }
-    let centred = |asc: f64, desc: f64| {
-        let span = asc - desc;
-        (span > 0.0 && span.is_finite()).then(|| {
-            let top = asc - (span - upem) / 2.0;
-            (top, top - upem)
-        })
-    };
-    font.and_then(|f| f.os2().ok())
-        .and_then(|t| centred(f64::from(t.s_typo_ascender()), f64::from(t.s_typo_descender())))
-        .or_else(|| centred(face.ascent, -face.descent))
-        .unwrap_or((upem * 0.88, upem * -0.12))
+    // Latin fonts with a one-em typo box (DejaVu) still centre on the cap height.
+    let cjk = face.menu_group().0 != crate::FontGroup::Western;
+    let typo_top = font.os2().ok().filter(|_| cjk).and_then(|t| {
+        let (asc, desc) = (f64::from(t.s_typo_ascender()), f64::from(t.s_typo_descender()));
+        (asc - desc == upem && asc > 0.0 && asc <= upem).then_some(asc)
+    });
+    let top = typo_top.or_else(|| {
+        let declared = font.metrics(Size::unscaled(), face.location()).cap_height.map(f64::from);
+        let cap = crate::fontdb::plausible(declared, upem).or_else(|| crate::fontdb::measured_top(&font, face.location(), &['H'], upem))?;
+        Some((upem + cap) / 2.0)
+    });
+    top.map_or(fallback, |top| ((top, top - upem), true))
 }
 
 /// The em box from the `BASE` table's horizontal axis: the Han script's values, else the default

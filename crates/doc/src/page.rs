@@ -246,7 +246,8 @@ impl Page {
 
 /// Split `area` into `n` equal columns separated by `gutter`.
 pub fn column_rects(area: Rect, n: u32, gutter: f64) -> Vec<Rect> {
-    let n = n.max(1) as usize;
+    // The public allocator also receives native/imported options, outside command validation.
+    let n = n.clamp(1, 216) as usize;
     let w = ((area.width() - gutter * (n as f64 - 1.0)) / n as f64).max(0.0);
     (0..n).map(|i| Rect::new(area.x0 + i as f64 * (w + gutter), area.y0, area.x0 + i as f64 * (w + gutter) + w, area.y1)).collect()
 }
@@ -401,5 +402,20 @@ mod tests {
         assert_eq!(s.page_at_x(700.0), Some(1));
         assert_eq!(s.page_at_x(-50.0), Some(0));
         assert_eq!(s.page_at_x(5000.0), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod column_allocation_safety_tests {
+    use super::*;
+
+    #[test]
+    fn column_allocation_caps_page_count_and_preserves_geometry() {
+        let area = Rect::new(0., 0., 300., 100.);
+        // Fail safely at a small boundary before exercising hostile counts.
+        assert_eq!(column_rects(area, 217, 0.).len(), 216);
+        assert_eq!(column_rects(area, u32::MAX, 0.).len(), 216);
+        assert_eq!(column_rects(area, 0, 12.), vec![area]);
+        assert_eq!(column_rects(area, 2, 12.), vec![Rect::new(0., 0., 144., 100.), Rect::new(156., 0., 300., 100.)]);
     }
 }
