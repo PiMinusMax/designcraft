@@ -797,6 +797,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-pdf"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=c3487320b2d1de657b860b3c8abb44e1f2b32bd8#c3487320b2d1de657b860b3c8abb44e1f2b32bd8"
+dependencies = [
+ "krilla",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-print"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=d991bf6792f8ade99c51358bf3c1d902c8cd96b5#d991bf6792f8ade99c51358bf3c1d902c8cd96b5"
@@ -887,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "arboard",
  "designcraft-engine",
@@ -905,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-cli"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-compose",
@@ -921,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-color"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "kurbo",
  "moxcms",
@@ -933,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-compose"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-doc",
@@ -951,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-doc"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-geom",
@@ -963,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-engine"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "caseless",
  "craft-print",
@@ -977,6 +986,7 @@ dependencies = [
  "designcraft-idml",
  "designcraft-images",
  "designcraft-pdf",
+ "designcraft-pptx",
  "designcraft-render",
  "designcraft-textimport",
  "designcraft-tools",
@@ -985,7 +995,7 @@ dependencies = [
  "hayro-syntax",
  "kurbo",
  "log",
- "quick-xml 0.38.4",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",
@@ -998,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-epub"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-doc",
@@ -1007,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-fonts"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "harfrust 0.13.3",
  "kurbo",
@@ -1019,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-format"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-doc",
  "serde",
@@ -1030,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-geom"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "flo_curves",
  "kurbo",
@@ -1043,20 +1053,20 @@ dependencies = [
 
 [[package]]
 name = "designcraft-idml"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-compose",
  "designcraft-doc",
  "designcraft-geom",
- "quick-xml 0.38.4",
+ "quick-xml",
  "thiserror 2.0.21",
  "zip",
 ]
 
 [[package]]
 name = "designcraft-images"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-fonts",
@@ -1067,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-mcp"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-engine",
  "designcraft-geom",
@@ -1080,8 +1090,9 @@ dependencies = [
 
 [[package]]
 name = "designcraft-pdf"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
+ "craft-pdf",
  "designcraft-color",
  "designcraft-compose",
  "designcraft-doc",
@@ -1092,7 +1103,6 @@ dependencies = [
  "hayro-interpret",
  "hayro-syntax",
  "image",
- "krilla",
  "krilla-svg",
  "kurbo",
  "log",
@@ -1101,8 +1111,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "designcraft-pptx"
+version = "0.8.0"
+dependencies = [
+ "designcraft-color",
+ "designcraft-compose",
+ "designcraft-doc",
+ "designcraft-fonts",
+ "designcraft-geom",
+ "designcraft-images",
+ "image",
+ "quick-xml",
+ "skrifa 0.47.0",
+ "thiserror 2.0.21",
+ "zip",
+]
+
+[[package]]
 name = "designcraft-render"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-compose",
@@ -1120,16 +1147,16 @@ dependencies = [
 
 [[package]]
 name = "designcraft-textimport"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-doc",
- "quick-xml 0.38.4",
+ "quick-xml",
  "zip",
 ]
 
 [[package]]
 name = "designcraft-tools"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-color",
  "designcraft-compose",
@@ -1141,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-ui-egui"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "craft-ui",
  "designcraft-color",
@@ -1169,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "designcraft-web"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "designcraft-engine",
  "designcraft-format",
@@ -2438,8 +2465,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27da593198b20eeba65caeb73c2bbeec3e53ab08fa549898312ce81c4fce5e33"
+source = "git+https://github.com/storytold/craft-libs?rev=c3487320b2d1de657b860b3c8abb44e1f2b32bd8#c3487320b2d1de657b860b3c8abb44e1f2b32bd8"
 dependencies = [
  "base64",
  "bumpalo",
@@ -3505,15 +3531,6 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
-
-[[package]]
-name = "quick-xml"
-version = "0.38.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "quick-xml"
@@ -5001,7 +5018,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.41.0",
+ "quick-xml",
  "quote",
 ]
 
@@ -5697,7 +5714,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "serde_json",
 ]

@@ -80,6 +80,9 @@ pub struct Selection {
     /// Key object for Align.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<ItemId>,
+    /// The page selected with the Page tool (absolute index).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<usize>,
 }
 
 impl Selection {

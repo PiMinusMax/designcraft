@@ -11,16 +11,10 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else { return };
     let doc = st.doc.clone();
-    let text = super::colors_affect_text(app);
-    let fill_cur = super::color_target(app).map(|t| t.0);
-    ui.horizontal(|ui| {
-        crate::rtl::label(
-            ui,
-            egui::RichText::new(crate::i18n::tr(&app.ui.language, if text { "Applies to text" } else { "Applies to fill" }))
-                .size(11.0)
-                .color(t.text_dim),
-        );
-    });
+    let target = super::color_target(app);
+    header(app, ui, &doc, target.as_ref());
+    // The row of the colour in front of the proxy is highlighted.
+    let fill_cur = target.map(|(fill, _, stroke, _)| if app.ui.stroke_front { stroke } else { fill });
     // Unnamed colours (mixed in the Color panel) aren't listed until Add to Swatches; swatches in
     // colour groups are listed under their folder.
     let grouped: Vec<&str> = doc.color_groups.iter().flat_map(|g| g.swatches.iter().map(String::as_str)).collect();
@@ -64,14 +58,24 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         }
     }
     ui.add_space(6.0);
+    // InDesign's bottom row: New Color Group, New Swatch, Delete Swatch (the one last clicked).
+    let picked: Option<String> = ui.data(|d| d.get_temp(egui::Id::new(PICKED))).filter(|n: &String| doc.swatch(n).is_some_and(|w| !w.locked));
     ui.horizontal(|ui| {
-        ui.label(crate::rtl::widget(
-            ui,
-            egui::RichText::new(crate::i18n::tr(&app.ui.language, "Right-click: stroke, groups")).size(10.5).color(t.text_disabled),
-        ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let del = ui
+                .add_enabled_ui(picked.is_some(), |ui| icons::button(ui, "trash", 20.0, false, crate::i18n::tr(&app.ui.language, "Delete Swatch")))
+                .inner;
+            if del.clicked()
+                && let Some(name) = &picked
+                && app.run("swatch.delete", json!({"name": name})).is_ok()
+            {
+                ui.data_mut(|d| d.remove::<String>(egui::Id::new(PICKED)));
+            }
             if icons::button(ui, "plus", 20.0, false, crate::i18n::tr(&app.ui.language, "New Swatch")).clicked() {
                 let _ = app.run("swatch.create", json!({"color": {"c": 0, "m": 50, "y": 100, "k": 0}}));
+            }
+            if folder_button(ui, crate::i18n::tr(&app.ui.language, "New Color Group")).clicked() {
+                let _ = app.run("swatch.newColorGroup", json!({}));
             }
             crate::menus::menu_button(ui, "☰", |ui| {
                 crate::menus::menu_button(ui, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Ink Manager")), |ui| {
@@ -114,8 +118,99 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     });
 }
 
-/// One Swatches panel row: chip, name, type; click applies to the fill (of the frames or their
-/// text, see [`super::colors_affect_text`]), the context menu to the stroke, colour groups and delete.
+/// Temp-data key of the swatch last clicked (Delete Swatch removes it).
+const PICKED: &str = "swatches_picked";
+
+/// The Swatches panel's top row, as InDesign's: a Fill/Stroke proxy (click: the other in front),
+/// Formatting Affects Container / Text, and the tint of the colour in front. `target` is
+/// [`super::color_target`]: fill and stroke swatches and tints of the text or the first object.
+fn header(app: &mut DesignApp, ui: &mut egui::Ui, doc: &designcraft_doc::Document, target: Option<&(String, f32, String, f32)>) {
+    let t = Tokens::get(ui.ctx());
+    let (fill_sw, stroke_sw) = target.map_or(("[None]", "[Black]"), |(f, _, s, _)| (f.as_str(), s.as_str()));
+    let text = super::colors_affect_text(app) || app.ui.formatting_affects_text;
+    let stroke_front = app.ui.stroke_front;
+    ui.add_space(3.0);
+    ui.horizontal(|ui| {
+        let (r, resp) = ui.allocate_exact_size(vec2(27.0, 27.0), Sense::click());
+        let tip = crate::i18n::tr(&app.ui.language, if stroke_front { "Stroke" } else { "Fill" });
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+        let fill_r = egui::Rect::from_min_size(r.min + vec2(1.0, 2.0), vec2(16.0, 16.0));
+        let stroke_r = egui::Rect::from_min_size(r.min + vec2(10.0, 10.0), vec2(16.0, 16.0));
+        let paint = |stroke: bool| {
+            let p = ui.painter();
+            if stroke {
+                // The stroke: a frame of its colour.
+                let (c, g) = crate::widgets::swatch_colors(doc, stroke_sw, 1.0);
+                crate::widgets::paint_chip(p, stroke_r, c, g);
+                p.rect_filled(stroke_r.shrink(4.0), 0.0, t.panel);
+                p.rect_stroke(stroke_r.shrink(4.0), 0.0, egui::Stroke::new(1.0, t.text_dim), egui::StrokeKind::Outside);
+                p.rect_stroke(stroke_r, 0.0, egui::Stroke::new(1.0, t.text_dim), egui::StrokeKind::Outside);
+            } else {
+                let (c, g) = crate::widgets::swatch_colors(doc, fill_sw, 1.0);
+                crate::widgets::paint_chip(p, fill_r, c, g);
+                p.rect_stroke(fill_r, 0.0, egui::Stroke::new(1.0, t.text_dim), egui::StrokeKind::Outside);
+            }
+        };
+        // The one in front is drawn last.
+        paint(!stroke_front);
+        paint(stroke_front);
+        if resp
+            .on_hover_ui(|ui| {
+                crate::rtl::label(ui, tip);
+            })
+            .clicked()
+        {
+            let _ = app.run("color.toggleFillStroke", json!({}));
+        }
+        ui.add_space(4.0);
+        for (k, (icon, tip)) in
+            [("format-container", "Formatting affects container (J)"), ("format-text", "Formatting affects text (J)")].into_iter().enumerate()
+        {
+            if icons::button(ui, icon, 20.0, text == (k == 1), crate::i18n::tr(&app.ui.language, tip)).clicked() {
+                let _ = app.run("app.formattingAffectsText", json!({"on": k == 1}));
+            }
+        }
+        ui.add_space(6.0);
+        crate::widgets::caption(ui, crate::i18n::tr(&app.ui.language, "Tint:"));
+        let tint = target.map(|(_, ft, _, st)| f64::from(if stroke_front { *st } else { *ft }) * 100.0);
+        if let Some(v) = crate::widgets::number(ui, "swatches_tint", tint, "", 44.0, 0) {
+            let _ = set_tint(app, v);
+        }
+        crate::widgets::caption(ui, "%");
+    });
+}
+
+/// The Tint field: `percent` of the colour in front of the proxy, for the text or each selected
+/// object, which keep their own swatches.
+fn set_tint(app: &mut DesignApp, percent: f64) -> Result<serde_json::Value, String> {
+    let v = percent.clamp(0.0, 100.0) / 100.0;
+    let stroke = app.ui.stroke_front;
+    if super::colors_affect_text(app) {
+        app.run("type.char", json!({"attrs": {if stroke { "strokeTint" } else { "fillTint" }: v}}))
+    } else {
+        app.run(if stroke { "object.stroke" } else { "object.fill" }, json!({"tint": v}))
+    }
+}
+
+/// A folder button (New Color Group), drawn like the colour groups' folders.
+fn folder_button(ui: &mut egui::Ui, tip: &str) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    if resp.hovered() {
+        ui.painter().rect_filled(r, 3.0, t.hover);
+    }
+    let f = egui::Rect::from_center_size(r.center(), vec2(14.0, 10.0));
+    ui.painter().rect_stroke(f, 1.5, egui::Stroke::new(1.2, t.icon), egui::StrokeKind::Inside);
+    ui.painter().line_segment([f.left_top() + vec2(1.0, 3.0), f.right_top() + vec2(-1.0, 3.0)], egui::Stroke::new(1.0, t.icon));
+    resp.on_hover_ui(|ui| {
+        crate::rtl::label(ui, tip);
+    })
+}
+
+/// One Swatches panel row: chip, name, type; click applies it to the fill or stroke in front of
+/// the proxy (of the frames or their text, see [`super::colors_affect_text`]), the context menu
+/// to the stroke, colour groups and delete.
 fn swatch_row(
     app: &mut DesignApp,
     ui: &mut egui::Ui,
@@ -126,6 +221,7 @@ fn swatch_row(
 ) {
     let t = Tokens::get(ui.ctx());
     let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &sw.name));
     if fill_cur == Some(sw.name.as_str()) {
         ui.painter().rect_filled(row, 0.0, t.row_selected);
     } else if resp.hovered() {
@@ -154,7 +250,8 @@ fn swatch_row(
     }
     ui.painter().text(row.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, kind, egui::FontId::proportional(10.5), t.text_dim);
     if resp.clicked() {
-        let _ = super::apply_swatch(app, false, &sw.name, None);
+        ui.data_mut(|d| d.insert_temp(egui::Id::new(PICKED), sw.name.clone()));
+        let _ = super::apply_swatch(app, app.ui.stroke_front, &sw.name, None);
     }
     resp.context_menu(|ui| {
         if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Apply to Stroke"))).clicked() {
@@ -267,12 +364,25 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     if let Some(sw) = sw.as_ref().filter(|w| !w.hidden && !w.locked) {
         let cur = if stroke { stroke_tint } else { fill_tint };
         let mut tint = cur * 100.0;
+        let mut commit = None;
         ui.horizontal(|ui| {
             ui.label("T");
-            if ui.add(egui::Slider::new(&mut tint, 0.0..=100.0).suffix("%").integer()).drag_stopped() {
-                let _ = super::apply_swatch(app, stroke, &sw.name, Some(tint / 100.0));
+            // The slider applies on release. The field keeps typed text while it has focus (the
+            // tint is read back from the document every frame) and applies it, clamped, on Enter
+            // or when it loses focus.
+            ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(60.0);
+            if ui.add(egui::Slider::new(&mut tint, 0.0..=100.0).integer().show_value(false)).drag_stopped() {
+                commit = Some(tint);
+            }
+            if let Some(v) =
+                crate::widgets::NumField::number("color_tint", Some(f64::from(cur) * 100.0), "%", 0).width(44.0).range(0.0, 100.0).show(ui)
+            {
+                commit = Some(v as f32);
             }
         });
+        if let Some(v) = commit {
+            let _ = super::apply_swatch(app, stroke, &sw.name, Some(v / 100.0));
+        }
     }
     let mut send: Option<serde_json::Value> = None;
     match mode {
@@ -410,11 +520,21 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         ));
         return;
     };
-    let fill = it.fill.clone();
+    // The fill's gradient, or the stroke's when the toolbox's Stroke box is in front (as InDesign's
+    // Gradient panel follows the Fill/Stroke proxy).
+    let target = if app.ui.stroke_front { "stroke" } else { "fill" };
+    let fill = if app.ui.stroke_front { it.stroke.as_fill() } else { it.fill.clone() };
     let Some(g) = designcraft_color::swatch::resolve_gradient(&st.doc.swatches, &fill.swatch).cloned() else {
-        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "The fill isn't a gradient.")).color(t.text_dim));
+        crate::rtl::label(
+            ui,
+            egui::RichText::new(crate::i18n::tr(
+                &app.ui.language,
+                if app.ui.stroke_front { "The stroke isn't a gradient." } else { "The fill isn't a gradient." },
+            ))
+            .color(t.text_dim),
+        );
         if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Apply Gradient"))).clicked() {
-            let _ = app.run("object.gradient", json!({}));
+            let _ = app.run("object.gradient", json!({"target": target, "target": target}));
         }
         return;
     };
@@ -427,7 +547,7 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             .show_ui(ui, |ui| {
                 for (k, v) in [("Linear", "linear"), ("Radial", "radial")] {
                     if ui.selectable_label(g.kind.label() == k, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, k))).clicked() {
-                        let _ = app.run("object.gradient", json!({"kind": v}));
+                        let _ = app.run("object.gradient", json!({"target": target, "kind": v}));
                     }
                 }
             });
@@ -438,7 +558,7 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             })
             .clicked()
         {
-            let _ = app.run("object.gradient", json!({"reverse": true}));
+            let _ = app.run("object.gradient", json!({"target": target, "reverse": true}));
         }
     });
     let sel_id = egui::Id::new("grad_sel");
@@ -450,13 +570,13 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         if let Some(v) = crate::widgets::number(ui, "grad_loc", loc, " %", 54.0, 1) {
             let mut stops = stops_json(&g);
             stops[sel]["location"] = json!(v.clamp(0.0, 100.0));
-            let _ = app.run("object.gradient", json!({"stops": stops}));
+            let _ = app.run("object.gradient", json!({"target": target, "stops": stops}));
         }
         if !radial {
             crate::widgets::caption(ui, crate::i18n::tr(&app.ui.language, "Angle:"));
             let angle = fill.gradient_vector.map(|[x0, y0, x1, y1]| (-(y1 - y0)).atan2(x1 - x0).to_degrees()).or(fill.gradient_angle).unwrap_or(0.0);
             if let Some(v) = crate::widgets::number(ui, "grad_angle", Some(angle), "°", 54.0, 1) {
-                let _ = app.run("object.gradient", json!({"angle": v}));
+                let _ = app.run("object.gradient", json!({"target": target, "angle": v}));
             }
         }
     });
@@ -506,7 +626,7 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         } else {
             stops[i]["location"] = json!(o as f64 * 100.0);
         }
-        let _ = app.run("object.gradient", json!({"stops": stops}));
+        let _ = app.run("object.gradient", json!({"target": target, "stops": stops}));
     }
     if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
@@ -519,7 +639,7 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
                 let (c, a) = g.sample(o);
                 let mut stops = stops_json(&g);
                 stops.push(json!({"location": o as f64 * 100.0, "color": c.to_hex(), "opacity": a as f64 * 100.0, "midpoint": 50.0}));
-                let _ = app.run("object.gradient", json!({"stops": stops}));
+                let _ = app.run("object.gradient", json!({"target": target, "stops": stops}));
                 sel = g.stops.iter().filter(|s| s.offset <= o).count();
             }
             None => {}
@@ -568,8 +688,97 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
                 let mut stops = stops_json(&g);
                 stops[sel]["color"] = json!(format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]));
-                let _ = app.run("object.gradient", json!({"stops": stops}));
+                let _ = app.run("object.gradient", json!({"target": target, "stops": stops}));
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod swatches_header_tests {
+    use egui_kittest::{Harness, kittest::Queryable};
+    use serde_json::json;
+
+    use super::*;
+
+    fn harness(app: DesignApp) -> Harness<'static, DesignApp> {
+        Harness::builder().with_size(vec2(300.0, 520.0)).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let id = egui::Id::new("test_fonts");
+                if ui.data(|d| d.get_temp::<bool>(id)).is_none() {
+                    crate::theme::install_fonts(ui.ctx(), "");
+                    ui.data_mut(|d| d.insert_temp(id, true));
+                    return;
+                }
+                show(app, ui);
+            },
+            app,
+        )
+    }
+
+    fn items(app: &DesignApp) -> Vec<designcraft_doc::Item> {
+        let st = app.session.doc().unwrap();
+        st.selection.items.iter().map(|id| st.doc.item(*id).unwrap().clone()).collect()
+    }
+
+    #[test]
+    fn swatches_go_to_the_fill_or_stroke_in_front_and_the_bottom_row_deletes_the_one_clicked() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "unassigned"})).unwrap();
+        app.run("swatch.create", json!({"name": "Brand", "color": "#108080"})).unwrap();
+        let mut h = harness(app);
+        h.run_steps(3);
+        // Fill in front: a swatch is the fill.
+        h.get_by_label("C=0 M=100 Y=0 K=0").click();
+        h.run_steps(2);
+        assert_eq!(items(h.state())[0].fill.swatch, "C=0 M=100 Y=0 K=0");
+        // The proxy brings the stroke to the front; the next swatch is the stroke.
+        h.get_by_label("Fill").click();
+        h.run_steps(2);
+        assert!(h.state().ui.stroke_front);
+        h.get_by_label("C=100 M=0 Y=0 K=0").click();
+        h.run_steps(2);
+        let it = &items(h.state())[0];
+        assert_eq!((it.fill.swatch.as_str(), it.stroke.swatch.as_str()), ("C=0 M=100 Y=0 K=0", "C=100 M=0 Y=0 K=0"));
+        // Formatting affects text, from the panel.
+        h.get_by_label("Formatting affects text (J)").click();
+        h.run_steps(2);
+        assert!(h.state().ui.formatting_affects_text);
+        h.get_by_label("Formatting affects container (J)").click();
+        h.run_steps(2);
+        assert!(!h.state().ui.formatting_affects_text);
+        // Delete Swatch removes the swatch last clicked.
+        h.get_by_label("Brand").click();
+        h.run_steps(2);
+        h.get_by_label("Delete Swatch").click();
+        h.run_steps(2);
+        assert!(h.state().session.doc().unwrap().doc.swatch("Brand").is_none());
+    }
+
+    #[test]
+    fn the_tint_field_keeps_each_objects_own_swatch() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let a = app.run("frame.create", json!({"rect": [36, 36, 100, 100], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        let b = app.run("frame.create", json!({"rect": [136, 36, 200, 100], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        app.run("object.fill", json!({"ids": [a], "swatch": "C=100 M=0 Y=0 K=0"})).unwrap();
+        app.run("object.fill", json!({"ids": [b], "swatch": "C=0 M=100 Y=0 K=0"})).unwrap();
+        app.run("object.stroke", json!({"ids": [a, b], "swatch": "[Black]"})).unwrap();
+        app.run("selection.set", json!({"ids": [a, b]})).unwrap();
+        let mut h = harness(app);
+        h.run_steps(3);
+        // The field shows the first selected object's fill tint.
+        assert!(h.query_all_by_value("100").next().is_some());
+        set_tint(h.state_mut(), 40.0).unwrap();
+        h.run_steps(2);
+        assert!(h.query_all_by_value("40").next().is_some(), "the field follows");
+        // The stroke in front: the strokes' tints.
+        h.state_mut().ui.stroke_front = true;
+        set_tint(h.state_mut(), 70.0).unwrap();
+        assert!(items(h.state()).iter().all(|i| i.stroke.tint == 0.7));
+        let it = items(h.state());
+        assert_eq!((it[0].fill.swatch.as_str(), it[0].fill.tint), ("C=100 M=0 Y=0 K=0", 0.4));
+        assert_eq!((it[1].fill.swatch.as_str(), it[1].fill.tint), ("C=0 M=100 Y=0 K=0", 0.4));
     }
 }

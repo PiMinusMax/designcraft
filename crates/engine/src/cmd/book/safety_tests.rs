@@ -1,4 +1,4 @@
-use super::{ChapterBatch, MAX_BATCH_CHAPTERS, write_staged_chapter};
+use super::{ChapterBatch, MAX_BATCH_CHAPTERS};
 use crate::Session;
 use serde_json::json;
 
@@ -26,7 +26,7 @@ fn a_commit_failure_reports_the_completed_prefix_and_cleans_staging() {
     let error = batch
         .commit_with(|path, staged| {
             calls += 1;
-            if path == second { Err(std::io::Error::other("synthetic disk full")) } else { write_staged_chapter(path, staged) }
+            if path == second { Err(std::io::Error::other("synthetic disk full")) } else { crate::io::replace_with(path, staged) }
         })
         .unwrap_err()
         .to_string();

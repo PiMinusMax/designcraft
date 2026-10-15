@@ -31,6 +31,7 @@ fn main() {
     }
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
+        .with_step_dt(1.0 / 60.0)
         .with_pixels_per_point(2.0)
         .with_max_steps(1_000_000)
         .wgpu()
@@ -77,6 +78,12 @@ fn main() {
                 }
             }
             step_n(&mut harness, 2);
+        }
+        // Frames that aren't rendered keep their texture changes for the next render: a script
+        // that edits a long document (every edit redraws the Pages panel's thumbnails) without
+        // screenshots piled them up until the shot's render timed out on the GPU. Render each line.
+        if l.get("shot").is_none() {
+            let _ = harness.render();
         }
     }
 }

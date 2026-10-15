@@ -169,8 +169,17 @@ impl Color {
         let [r, g, b] = self.to_rgb();
         Color::rgb(1.0 - r, 1.0 - g, 1.0 - b)
     }
-    /// Linear interpolation in display RGB.
+    /// The colour `t` of the way to `other`. Process inks blend as inks (CMYK with CMYK or grey,
+    /// grey with grey), as InDesign blends a gradient's stops; anything else blends in RGB.
     pub fn lerp(&self, other: &Color, t: f32) -> Color {
+        let l = |a: f32, b: f32| a + (b - a) * t;
+        match (*self, *other) {
+            (Color::Cmyk { c, m, y, k }, Color::Cmyk { c: c2, m: m2, y: y2, k: k2 }) => return Color::cmyk(l(c, c2), l(m, m2), l(y, y2), l(k, k2)),
+            (Color::Gray { k }, Color::Gray { k: k2 }) => return Color::gray(l(k, k2)),
+            (Color::Gray { k }, Color::Cmyk { .. }) => return Color::cmyk(0.0, 0.0, 0.0, k).lerp(other, t),
+            (Color::Cmyk { .. }, Color::Gray { k }) => return self.lerp(&Color::cmyk(0.0, 0.0, 0.0, k), t),
+            _ => {}
+        }
         let a = self.to_rgb();
         let b = other.to_rgb();
         Color::rgb(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)

@@ -15,6 +15,7 @@ mod frame;
 mod gradient;
 pub mod layout;
 mod nav;
+pub use nav::{LOCK_OFFSET_PX, PIN_OFFSET_PX};
 mod pen;
 mod pencil;
 pub mod select;
@@ -29,7 +30,7 @@ use designcraft_geom::{Affine, BezPath, Point, Rect, Unit, Vec2};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use catalog::{TOOL_GROUPS, ToolInfo, tool_for_shortcut, tool_info};
+pub use catalog::{SPLIT_IN_TWO_COLUMNS, TOOL_GROUPS, ToolInfo, tool_for_shortcut, tool_info};
 pub use layout::CanvasLayout;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +214,8 @@ pub struct ToolContext<'a> {
     pub layer: designcraft_doc::LayerId,
     pub snap: SnapView,
     pub unit: Unit,
+    /// The toolbox's Stroke box is in front: sampled colours go to strokes (the Eyedropper).
+    pub stroke_in_front: bool,
 }
 
 impl ToolContext<'_> {
@@ -322,6 +325,28 @@ pub enum Overlay {
         b: Point,
         label: String,
     },
+    /// A page selected with the Page tool (canvas rect): its outline and eight handles.
+    PageHandles(Rect),
+    /// A small tag whose bottom-left is at `p` (the Page tool's liquid page rule; English, the UI
+    /// translates it).
+    Tag {
+        p: Point,
+        text: String,
+    },
+    /// A tooltip near the pointer (English; the UI translates it).
+    Tip {
+        p: Point,
+        text: String,
+    },
+    /// An object's liquid pins and resize locks on an object-based page (Page tool), canvas
+    /// coordinates: pinned sides (top, right, bottom, left) and whether width and height follow the
+    /// page.
+    LiquidPins {
+        object: Rect,
+        page: Rect,
+        pins: [bool; 4],
+        resize: [bool; 2],
+    },
 }
 
 /// Correction from a snap, in spread coordinates for `delta`.
@@ -348,8 +373,16 @@ pub enum Cursor {
     ResizeNeSw,
     Rotate,
     Pen,
+    /// The pen over a segment of a selected path: a click adds an anchor there.
+    PenAdd,
+    /// The pen over an anchor of a selected path: a click deletes it.
+    PenDelete,
+    /// The pen over the first anchor of the path it is drawing: a click closes it.
+    PenClose,
     /// The Pen over an open path's end point: a click continues the path.
     PenContinue,
+    /// Convert Direction Point.
+    PenConvert,
     /// Over a type-on-a-path bracket: dragging it moves where the text starts or ends.
     PathBracket,
     Text,
@@ -412,7 +445,7 @@ pub fn create(id: &str) -> Box<dyn Tool> {
         "hand" => Box::new(nav::HandTool::default()),
         "placeGun" => Box::new(nav::PlaceGun::default()),
         "zoom" => Box::new(nav::ZoomTool::default()),
-        "page" => Box::new(nav::PageTool),
+        "page" => Box::new(nav::PageTool::default()),
         "typeOnPath" => Box::new(nav::PathTypeTool),
         "gap" => Box::new(nav::GapTool::default()),
         "contentCollector" => Box::new(nav::ConveyorTool::new(false)),

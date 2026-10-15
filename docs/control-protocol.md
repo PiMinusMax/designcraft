@@ -39,7 +39,7 @@ so only enable it while you use it. Transport: `apps/designcraft/src/control_ser
 | `ui.tool.select` | `{tool}` | Select a tool (`selection`, `type`, `rectangleFrame`, …) |
 | `ui.pointer` | `{events:[{kind: down\|drag\|up\|move\|doubleclick, x, y, space?: "screen"\|"canvas", clicks?}], mods?}` | Drive the active tool through the same code path as the mouse; `clicks` on a `down` is the press count (3 = triple click); returns the selection, the tool and its cursor at the last event (e.g. `LoadedText`, `ThreadLink`, `Unthread`) |
 | `ui.key` / `ui.text` | `{key, shift?, alt?, cmd?}` / `{text}` | Synthetic keyboard input (typing into a text frame) |
-| `ui.move` / `ui.click` / `ui.drag` | screen points, `button?: left\|right\|middle` | Real egui pointer input — reaches every widget, menu and panel |
+| `ui.move` / `ui.click` / `ui.drag` | screen points, `button?: left\|right\|middle`, `count?: positive integer` (click/drag, default 1), `steps?: positive integer` (drag, default 8) | Real egui pointer input — reaches every widget, menu and panel |
 | `ui.set` | `{brightness?, panel?, rulers?, guides?, frameEdges?, baselineGrid?, textThreads?, screenMode?, zoom?, page?, fit?}` | UI state |
 | `ui.dialog.open` | `{id, fields?}` | Open a dialog by id (e.g. `paragraphStyleOptions` or `characterStyleOptions` with `{name, section}`, or `{new: true}` for a new style) |
 | `ui.dialog.set` / `ui.dialog.confirm` / `ui.dialog.cancel` | `{field, value}` | Fill and confirm the open dialog |
@@ -56,6 +56,17 @@ merged document; the template stays as it was ([agents.md](agents.md#data-merge)
 Headless window screenshots (locked screen, hidden window): `cargo run -p designcraft-ui-egui --example ui_shot -- script.jsonl`, where each line is one of the requests above, `{"shot": "/abs/out.png"}` or `{"steps": n}` (renders the whole UI offscreen with wgpu).
 
 The MCP server (`designcraft-cli mcp`) wraps the same methods for Claude and other agents.
+
+### Click and drag limits
+
+`ui.click` and `ui.drag` validate the whole gesture before queuing any input. They permit at
+most 10,003 pending synthetic events, including input already waiting for native frames. A
+click uses `1 + 2 * count` events; a drag uses `1 + steps + 2 * count`. The count includes the
+initial click or drag; further clicks occur at its endpoint. `count` is at most 255; an empty
+queue accepts a single drag with up to 10,000 steps. `count` and `steps` must be positive
+JSON integers when supplied; invalid or over-budget requests return `ok: false` and leave pending
+input unchanged. Oversized gestures are rejected rather than truncated. Wait for queued input
+to finish before retrying a request that would exceed the pending-event limit.
 
 ## Shared panel docking
 

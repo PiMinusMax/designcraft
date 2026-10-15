@@ -114,6 +114,9 @@ pub struct Page {
     /// Liquid page rule: how objects follow when the page changes size.
     #[serde(default, skip_serializing_if = "LiquidRule::is_off")]
     pub liquid: LiquidRule,
+    /// Page tool › Show Parent Page Overlay: the parent page's size drawn over this page.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_parent_overlay: bool,
     /// Window › Interactive › Page Transitions (the spread's first page holds the spread's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<PageTransition>,
@@ -208,6 +211,8 @@ pub enum LiquidRule {
     GuideBased,
     /// Each object's pins and resize settings decide (`Item::liquid`).
     ObjectBased,
+    /// The rule of the page's parent page (InDesign's "Controlled by Parent"; Off without one).
+    ControlledByParent,
 }
 
 impl LiquidRule {
@@ -368,6 +373,7 @@ mod tests {
             liquid: Default::default(),
             transition: None,
             view_rotation: 0,
+            show_parent_overlay: false,
         }
     }
 

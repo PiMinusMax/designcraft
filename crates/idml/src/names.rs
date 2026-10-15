@@ -74,6 +74,31 @@ pub fn fitting_in(s: &str) -> designcraft_doc::Fitting {
     }
 }
 
+pub fn liquid_rule_out(rule: designcraft_doc::LiquidRule) -> &'static str {
+    use designcraft_doc::LiquidRule as R;
+    match rule {
+        R::Off => "Off",
+        R::Scale => "Scale",
+        R::ReCenter => "Recenter",
+        R::GuideBased => "GuideBased",
+        R::ObjectBased => "ObjectBased",
+        R::ControlledByParent => "UseMaster",
+    }
+}
+
+pub fn liquid_rule_in(s: &str) -> designcraft_doc::LiquidRule {
+    use designcraft_doc::LiquidRule as R;
+    match s {
+        "Off" => R::Off,
+        "Scale" => R::Scale,
+        "Recenter" => R::ReCenter,
+        "GuideBased" => R::GuideBased,
+        "ObjectBased" => R::ObjectBased,
+        "UseMaster" => R::ControlledByParent,
+        _ => R::Off,
+    }
+}
+
 pub fn escape_id(s: &str) -> String {
     s.replace('%', "%25").replace(':', "%3a")
 }
@@ -692,4 +717,30 @@ pub fn digits_out(d: designcraft_doc::Digits) -> &'static str {
 pub fn digits_in(s: &str) -> Option<designcraft_doc::Digits> {
     use designcraft_doc::Digits;
     [Digits::Default, Digits::Arabic, Digits::Hindi, Digits::Farsi, Digits::Native].into_iter().find(|d| digits_out(*d) == s)
+}
+
+/// A TOC separator in IDML's special-character notation: `^t` is a tab, `^^` a caret.
+pub fn toc_separator_out(s: &str) -> String {
+    s.replace('^', "^^").replace('\t', "^t")
+}
+/// IDML TOC separator → text (`^t` and `^y`, the right indent tab, are tabs; other codes stay).
+pub fn toc_separator_in(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '^' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('t' | 'y') => out.push('\t'),
+            Some('^') => out.push('^'),
+            Some(o) => {
+                out.push('^');
+                out.push(o);
+            }
+            None => out.push('^'),
+        }
+    }
+    out
 }

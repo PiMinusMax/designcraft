@@ -486,64 +486,118 @@ pub fn buttons(app: &mut DesignApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Liquid Layout panel: the current page's rule, the selection's pins (object-based), the page's
-/// liquid guides, and Create Alternate Layout.
+/// Liquid page rules in InDesign's order, with their menu labels.
+pub const LIQUID_RULES: [(designcraft_doc::LiquidRule, &str); 5] = [
+    (designcraft_doc::LiquidRule::Off, "Off"),
+    (designcraft_doc::LiquidRule::Scale, "Scale"),
+    (designcraft_doc::LiquidRule::ReCenter, "Re-center"),
+    (designcraft_doc::LiquidRule::ObjectBased, "Object-based"),
+    (designcraft_doc::LiquidRule::GuideBased, "Guide-based"),
+];
+
+/// A liquid page rule's menu label.
+pub fn liquid_rule_label(rule: designcraft_doc::LiquidRule) -> &'static str {
+    LIQUID_RULES.iter().find(|(r, _)| *r == rule).map_or("Off", |(_, l)| l)
+}
+
+/// Whether page `abs` follows the object-based rule (its own, or its parent page's).
+fn object_based(d: &designcraft_doc::Document, abs: usize) -> bool {
+    use designcraft_doc::LiquidRule as L;
+    let Some((si, pi)) = d.page_loc(abs) else { return false };
+    match d.spreads[si].pages[pi].liquid {
+        L::ObjectBased => true,
+        L::ControlledByParent => {
+            d.parent_page_for(abs).and_then(|(ppi, ppg)| d.parents.get(ppi)?.pages.get(ppg).map(|p| p.liquid == L::ObjectBased)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Liquid Layout panel, laid out as InDesign's: the page's Liquid Page Rule (with "Page: n"),
+/// Content › Auto-Fit, and Object Constraints › Resize with Page (Height, Width) and Pin (Top,
+/// Left, Bottom, Right) for the selected object on an object-based page. The page's liquid
+/// guides follow (Create Alternate Layout is in the Layout menu).
 pub fn liquid(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    let Some(page) = crate::canvas::current_page(app) else {
-        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "No document.")).size(11.0).color(t.text_dim));
+    let lang = app.ui.language.clone();
+    // The Page tool's page, the page in view, or (before the canvas lays out) the first.
+    let Some(page) = app.session.active().map(|s| s.selection.page.or_else(|| crate::canvas::current_page(app)).unwrap_or(0)) else {
+        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, "No document.")).size(11.0).color(t.text_dim));
         return;
     };
     let Some(d) = app.session.active().map(|d| d.doc.clone()) else { return };
     let Some((si, pi)) = d.page_loc(page) else { return };
     let pg = d.spreads[si].pages[pi].clone();
-    use designcraft_doc::LiquidRule as L;
-    crate::rtl::label(ui, egui::RichText::new(format!("{} {}", crate::i18n::tr(&app.ui.language, "Page"), d.page_name(page))).strong());
-    let mut rule = pg.liquid;
-    egui::ComboBox::from_id_salt("liquid_rule")
-        .selected_text(crate::rtl::widget(
-            ui,
-            crate::i18n::tr(
-                &app.ui.language,
-                match rule {
-                    L::Off => "Off",
-                    L::Scale => "Scale",
-                    L::ReCenter => "Re-center",
-                    L::GuideBased => "Guide-based",
-                    L::ObjectBased => "Object-based",
-                },
-            ),
-        ))
-        .show_ui(ui, |ui| {
-            for (r, label) in
-                [(L::Off, "Off"), (L::Scale, "Scale"), (L::ReCenter, "Re-center"), (L::GuideBased, "Guide-based"), (L::ObjectBased, "Object-based")]
-            {
-                ui.selectable_value(&mut rule, r, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label)));
-            }
+    ui.horizontal(|ui| {
+        crate::widgets::caption(ui, crate::i18n::tr(&lang, "Liquid Page Rule:"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::widgets::caption(ui, &format!("{} {}", crate::i18n::tr(&lang, "Page:"), d.page_name(page)));
         });
-    if rule != pg.liquid {
-        let _ = app.run("liquid.pageRule", json!({"rule": rule, "pages": [page + 1]}));
-    }
-    if rule == L::ObjectBased
-        && let Some(id) = app.session.active().and_then(|s| s.selection.items.first().copied())
-        && let Some(it) = d.item(id)
-    {
-        ui.separator();
-        let l = it.liquid.unwrap_or(designcraft_doc::ObjectLiquid { resize_width: true, resize_height: true, ..Default::default() });
-        let mut v = [l.resize_width, l.resize_height, l.pin_top, l.pin_bottom, l.pin_left, l.pin_right];
-        let keys = ["resizeWidth", "resizeHeight", "pinTop", "pinBottom", "pinLeft", "pinRight"];
-        let labels = ["Resize width", "Resize height", "Pin top", "Pin bottom", "Pin left", "Pin right"];
-        ui.horizontal_wrapped(|ui| {
-            for ((on, key), label) in v.iter_mut().zip(keys).zip(labels) {
-                if ui.checkbox(on, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).changed() {
-                    let _ = app.run("liquid.object", json!({key: *on}));
+    });
+    egui::ComboBox::from_id_salt("liquid_rule")
+        .selected_text(crate::rtl::widget(ui, crate::i18n::tr(&lang, liquid_rule_label(pg.liquid))))
+        .width(190.0)
+        .show_ui(ui, |ui| {
+            for (r, label) in LIQUID_RULES {
+                if ui.selectable_label(pg.liquid == r, crate::rtl::widget(ui, crate::i18n::tr(&lang, label))).clicked() && r != pg.liquid {
+                    let _ = app.run("liquid.pageRule", json!({"rule": r, "pages": [page + 1]}));
                 }
             }
         });
-    }
+    ui.separator();
+    // The selected object (one on this page).
+    let item = app
+        .session
+        .active()
+        .and_then(|s| s.selection.items.first().copied())
+        .and_then(|id| d.item(id))
+        .filter(|it| d.page_of_item(it.id) == Some(page));
+    // Content: Auto-Fit (graphic frames).
+    crate::widgets::caption(ui, crate::i18n::tr(&lang, "Content:"));
+    let graphic = item.and_then(|it| if let designcraft_doc::Content::Graphic(g) = &it.content { Some(g.auto_fit) } else { None });
+    let mut auto = graphic.is_some_and(|f| f != designcraft_doc::Fitting::None);
+    ui.indent("liquid_content", |ui| {
+        let r = ui.add_enabled(graphic.is_some(), egui::Checkbox::new(&mut auto, crate::rtl::widget(ui, crate::i18n::tr(&lang, "Auto-Fit"))));
+        if r.changed() {
+            let _ = app.run("object.fittingOptions", json!({"autoFit": auto}));
+        }
+    });
+    // Object Constraints: for an object on an object-based page.
+    crate::widgets::caption(ui, crate::i18n::tr(&lang, "Object Constraints:"));
+    let on = item.is_some() && object_based(&d, page);
+    let l = item
+        .filter(|_| on)
+        .map(|it| it.liquid.unwrap_or(designcraft_doc::ObjectLiquid { resize_width: true, resize_height: true, ..Default::default() }))
+        .unwrap_or_default();
+    ui.indent("liquid_constraints", |ui| {
+        ui.add_enabled_ui(on, |ui| {
+            let rows: [(&str, [(&str, &str, bool); 2]); 2] = [
+                ("Resize with Page:", [("Height", "resizeHeight", l.resize_height), ("Width", "resizeWidth", l.resize_width)]),
+                ("Pin:", [("Top", "pinTop", l.pin_top), ("Left", "pinLeft", l.pin_left)]),
+            ];
+            for (title, boxes) in rows {
+                crate::widgets::caption(ui, crate::i18n::tr(&lang, title));
+                let mut grid_boxes = vec![boxes.to_vec()];
+                if title == "Pin:" {
+                    grid_boxes.push(vec![("Bottom", "pinBottom", l.pin_bottom), ("Right", "pinRight", l.pin_right)]);
+                }
+                egui::Grid::new(("liquid_grid", title)).num_columns(2).min_col_width(90.0).show(ui, |ui| {
+                    for row in grid_boxes {
+                        for (label, key, value) in row {
+                            let mut v = value;
+                            if ui.checkbox(&mut v, crate::rtl::widget(ui, crate::i18n::tr(&lang, label))).changed() {
+                                let _ = app.run("liquid.object", json!({key: v}));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+    });
     if !pg.guides.is_empty() {
         ui.separator();
-        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Liquid guides")).size(11.0).color(t.text_dim));
+        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, "Liquid guides")).size(11.0).color(t.text_dim));
         for (gi, g) in pg.guides.iter().enumerate() {
             let mut on = g.liquid;
             let label = format!("{:?} at {:.1}", g.orientation, g.position);
@@ -552,22 +606,6 @@ pub fn liquid(app: &mut DesignApp, ui: &mut egui::Ui) {
             }
         }
     }
-    ui.separator();
-    let key = egui::Id::new("alt_layout");
-    let (mut name, mut w, mut h): (String, f64, f64) = ui.data(|x| x.get_temp(key)).unwrap_or(("Tablet H".into(), 1024.0, 768.0));
-    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Create Alternate Layout")).size(11.0).color(t.text_dim));
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut name).desired_width(90.0));
-        ui.add(egui::DragValue::new(&mut w).range(1.0..=15552.0).suffix(" pt"));
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "×"));
-        ui.add(egui::DragValue::new(&mut h).range(1.0..=15552.0).suffix(" pt"));
-    });
-    if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Create"))).clicked()
-        && let Err(e) = app.run("layout.createAlternate", json!({"name": name, "width": w, "height": h}))
-    {
-        app.status(format!("Alternate layout: {e}"));
-    }
-    ui.data_mut(|x| x.insert_temp(key, (name, w, h)));
 }
 
 /// Media panel: the selected video or sound's playback options and poster.
@@ -732,4 +770,46 @@ pub fn track_changes(app: &mut DesignApp, ui: &mut egui::Ui) {
             let _ = app.run("changes.rejectAll", json!({}));
         }
     });
+}
+
+#[cfg(test)]
+mod liquid_panel_tests {
+    use egui_kittest::{Harness, kittest::Queryable};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn object_constraints_set_the_selected_objects_pins_and_resizing() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [100, 100, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(260.0, 420.0)).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let key = egui::Id::new("test_fonts");
+                if ui.data(|d| d.get_temp::<bool>(key)).is_none() {
+                    crate::theme::install_fonts(ui.ctx(), "");
+                    ui.data_mut(|d| d.insert_temp(key, true));
+                    return;
+                }
+                liquid(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let l = |h: &Harness<'_, DesignApp>| h.state().session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().liquid;
+        // With the rule off the constraints don't apply.
+        h.get_by_label("Right").click();
+        h.run_steps(2);
+        assert_eq!(l(&h), None);
+        h.state_mut().run("liquid.pageRule", json!({"rule": "objectBased"})).unwrap();
+        h.run_steps(2);
+        h.get_by_label("Right").click();
+        h.run_steps(2);
+        h.get_by_label("Width").click();
+        h.run_steps(2);
+        let v = l(&h).unwrap();
+        assert!(v.pin_right && !v.resize_width && v.resize_height, "{v:?}");
+        let _ = h.get_by_label("Auto-Fit");
+    }
 }

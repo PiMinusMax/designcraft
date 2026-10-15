@@ -100,6 +100,30 @@ fn key_from(name: &str) -> Option<egui::Key> {
     })
 }
 
+// Retain room for the existing maximum drag (10,000 moves plus move/down/up), but
+// bound the whole gesture and already queued input before generating any events.
+const MAX_PENDING_POINTER_EVENTS: usize = 10_003;
+
+fn pointer_counts(p: &Value, drag: bool, pending: usize) -> Result<(u64, u64), String> {
+    let positive = |name: &str, default: u64| match p.get(name) {
+        None => Ok(default),
+        Some(v) => v.as_u64().filter(|n| *n > 0).ok_or_else(|| format!("`{name}` must be a positive integer")),
+    };
+    let count = positive("count", 1)?;
+    if count > 255 {
+        return Err("`count` must be an integer from 1 through 255".into());
+    }
+    let steps = if drag { positive("steps", 8)? } else { 0 };
+    // One initial move, two button events per click, and each drag step. Check the
+    // arithmetic too: hostile counts must never overflow into a small budget.
+    let events = count.checked_mul(2).and_then(|n| n.checked_add(steps)).and_then(|n| n.checked_add(1));
+    let available = MAX_PENDING_POINTER_EVENTS.saturating_sub(pending) as u64;
+    if events.is_none_or(|n| n > available) {
+        return Err(format!("pointer input would exceed the {MAX_PENDING_POINTER_EVENTS} pending-event limit"));
+    }
+    Ok((count, steps))
+}
+
 /// Handle one control request. Commands it runs leave the user's system clipboard alone.
 pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     app.install_clipboard_guard(ctx);
@@ -196,14 +220,11 @@ fn handle_request(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest
             ok(Value::Null)
         }
         "ui.click" | "ui.drag" => {
-            let count = match p.get("count") {
-                None => 1,
-                Some(v) => match v.as_u64().filter(|n| (1..=255).contains(n)) {
-                    Some(n) => n,
-                    None => return err("`count` must be an integer from 1 through 255"),
-                },
-            };
             // Screen-space (egui points) pointer input through egui itself: reaches every widget.
+            let (count, steps) = match pointer_counts(p, req.method == "ui.drag", app.control_synthetic.len().saturating_add(app.synthetic.len())) {
+                Ok(counts) => counts,
+                Err(e) => return err(e),
+            };
             let f = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
             let button = match s("button") {
                 Some("right") | Some("secondary") => egui::PointerButton::Secondary,
@@ -223,8 +244,6 @@ fn handle_request(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest
             app.control_synthetic.push(egui::Event::PointerMoved(a));
             app.control_synthetic.push(egui::Event::PointerButton { pos: a, button, pressed: true, modifiers });
             if req.method == "ui.drag" {
-                // From the caller: a huge count would queue events until memory runs out.
-                let steps = p.get("steps").and_then(Value::as_u64).unwrap_or(8).clamp(1, 10_000);
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
                     app.control_synthetic.push(egui::Event::PointerMoved(a + (end - a) * t));
@@ -310,13 +329,19 @@ fn handle_request(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest
         "ui.dialog.set" => match app.ui.dialog.as_mut() {
             Some(d) => {
                 let Some(f) = s("field") else { return err("missing `field`") };
-                d.fields.insert(f.to_string(), p.get("value").cloned().unwrap_or(Value::Null));
+                let value = p.get("value").cloned().unwrap_or(Value::Null);
+                if d.set_field(f, value) {
+                    app.session.reset_find_scope();
+                }
                 ok(serde_json::to_value(&*d).unwrap_or_default())
             }
             None => err("no dialog open"),
         },
         "ui.dialog.open" => {
             let Some(id) = s("id") else { return err("missing `id`") };
+            if id == "findChange" || app.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange") {
+                app.session.reset_find_scope();
+            }
             let d = crate::dialogs::Dialog::new(id, p.get("fields").cloned().unwrap_or(Value::Null));
             let v = serde_json::to_value(&d).unwrap_or_default();
             app.ui.dialog = Some(d);
@@ -440,6 +465,127 @@ mod automation_contract_tests {
             },
         );
         output.textures_delta.clear();
+    }
+    #[test]
+    fn oversized_pointer_requests_leave_pending_events_unchanged() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let pending = vec![egui::Event::PointerMoved(egui::pos2(12.0, 34.0))];
+        for (method, params) in [
+            ("ui.click", json!({"count": 5002})),
+            ("ui.drag", json!({"steps": 10000, "count": 2})),
+            ("ui.drag", json!({"steps": 10001})),
+            ("ui.click", json!({"count": u64::MAX})),
+            ("ui.drag", json!({"steps": u64::MAX})),
+            ("ui.drag", json!({"count": u64::MAX, "steps": u64::MAX})),
+        ] {
+            app.control_synthetic = pending.clone();
+            let reply = call(&mut app, &ctx, method, params);
+            assert_eq!(reply["ok"], false, "{method}: {reply}");
+            assert_eq!(app.control_synthetic, pending, "a rejected gesture must not leave a press queued");
+        }
+    }
+    #[test]
+    fn pointer_counts_require_positive_json_integers() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let pending = vec![egui::Event::PointerMoved(egui::pos2(12.0, 34.0))];
+        app.control_synthetic = pending.clone();
+        for value in [json!(0), json!(-1), json!(1.5), Value::Null, json!("2"), json!(true), json!(18446744073709551616_f64)] {
+            for (method, field) in [("ui.click", "count"), ("ui.drag", "count"), ("ui.drag", "steps")] {
+                let mut params = json!({});
+                params[field] = value.clone();
+                let reply = call(&mut app, &ctx, method, params);
+                assert_eq!(reply["ok"], false, "{method}, {field}={value}: {reply}");
+                assert!(reply["error"].as_str().unwrap().contains(field));
+                assert_eq!(app.control_synthetic, pending);
+            }
+        }
+    }
+    #[test]
+    fn pointer_gestures_accept_the_exact_event_budget() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        for (method, params) in
+            [("ui.drag", json!({"steps": 9492, "count": 255})), ("ui.drag", json!({"steps": 10000})), ("ui.drag", json!({"steps": 9998, "count": 2}))]
+        {
+            app.control_synthetic.clear();
+            assert_eq!(call(&mut app, &ctx, method, params)["ok"], true, "{method}");
+            assert_eq!(app.control_synthetic.len(), 10003);
+            assert!(matches!(app.control_synthetic.last(), Some(egui::Event::PointerButton { pressed: false, .. })));
+            let queued = app.control_synthetic.clone();
+            assert_eq!(call(&mut app, &ctx, "ui.click", json!({}))["ok"], false);
+            assert_eq!(app.control_synthetic, queued, "a full queue retains its release events");
+        }
+    }
+    #[test]
+    fn pointer_budget_counts_pending_input_and_recovers_when_it_drains() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        assert_eq!(call(&mut app, &ctx, "ui.drag", json!({"steps": 9998}))["ok"], true);
+        assert_eq!(app.control_synthetic.len(), 10001);
+        let queued = app.control_synthetic.clone();
+        assert_eq!(call(&mut app, &ctx, "ui.click", json!({}))["ok"], false);
+        assert_eq!(app.control_synthetic, queued);
+        // The ordinary input hook consumes one pointer event per frame, freeing
+        // enough room for a complete click without dropping earlier input.
+        app.raw_input_hook(&mut egui::RawInput::default());
+        assert_eq!(app.control_synthetic.len(), 10000);
+        assert_eq!(call(&mut app, &ctx, "ui.click", json!({}))["ok"], true);
+        assert_eq!(app.control_synthetic.len(), 10003);
+
+        app.control_synthetic.clear();
+        assert_eq!(call(&mut app, &ctx, "ui.move", json!({"x": 12, "y": 34}))["ok"], true);
+        let queued = app.control_synthetic.clone();
+        assert_eq!(call(&mut app, &ctx, "ui.drag", json!({"steps": 10000}))["ok"], false);
+        assert_eq!(app.control_synthetic, queued);
+        assert_eq!(call(&mut app, &ctx, "ui.drag", json!({"steps": 9999}))["ok"], true);
+        assert_eq!(app.control_synthetic.len(), 10003);
+    }
+    #[test]
+    fn ordinary_pointer_gestures_keep_their_defaults_and_event_order() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let a = egui::pos2(10.0, 20.0);
+        let end = egui::pos2(30.0, 40.0);
+        assert_eq!(call(&mut app, &ctx, "ui.click", json!({"x": 10, "y": 20}))["ok"], true);
+        assert_eq!(
+            app.control_synthetic,
+            vec![
+                egui::Event::PointerMoved(a),
+                egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ]
+        );
+        app.control_synthetic.clear();
+        assert_eq!(call(&mut app, &ctx, "ui.drag", json!({"x": 10, "y": 20, "toX": 30, "toY": 40}))["ok"], true);
+        assert_eq!(app.control_synthetic.len(), 11, "default drag has eight steps");
+        assert_eq!(app.control_synthetic.get(9), Some(&egui::Event::PointerMoved(end)));
+
+        app.control_synthetic.clear();
+        assert_eq!(
+            call(
+                &mut app,
+                &ctx,
+                "ui.drag",
+                json!({"x": 10, "y": 20, "toX": 30, "toY": 40, "steps": 2, "count": 2, "button": "right", "shift": true})
+            )["ok"],
+            true
+        );
+        let modifiers = egui::Modifiers { shift: true, ..Default::default() };
+        let button = egui::PointerButton::Secondary;
+        assert_eq!(
+            app.control_synthetic,
+            vec![
+                egui::Event::PointerMoved(a),
+                egui::Event::PointerButton { pos: a, button, pressed: true, modifiers },
+                egui::Event::PointerMoved(egui::pos2(20.0, 30.0)),
+                egui::Event::PointerMoved(end),
+                egui::Event::PointerButton { pos: end, button, pressed: false, modifiers },
+                egui::Event::PointerButton { pos: end, button, pressed: true, modifiers },
+                egui::Event::PointerButton { pos: end, button, pressed: false, modifiers },
+            ]
+        );
     }
     #[test]
     fn control_typing_uses_explicit_caret_but_retains_widget_events() {

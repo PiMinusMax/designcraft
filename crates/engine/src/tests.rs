@@ -570,6 +570,364 @@ fn commands_take_non_object_params_without_panicking() {
     }
 }
 
+#[test]
+fn paragraph_style_edit_persists_attrs_and_rename() {
+    let mut s = session();
+    let name =
+        s.execute("style.paragraph.create", &json!({"name": "Body Copy", "para": {"align": "left"}})).unwrap()["name"].as_str().unwrap().to_string();
+    s.execute("style.paragraph.edit", &json!({"name": name, "para": {"align": "center"}})).unwrap();
+    {
+        let st = s.doc().unwrap();
+        let style = st.doc.styles.para(&name).expect("style still exists");
+        assert_eq!(style.para.align, Some(designcraft_doc::Align::Center), "edited attribute persisted");
+    }
+    // Renaming updates the style definition itself, and every place it's referenced.
+    s.execute("style.paragraph.edit", &json!({"name": name, "rename": "Body Text"})).unwrap();
+    let st = s.doc().unwrap();
+    assert!(st.doc.styles.para("Body Text").is_some(), "renamed style exists under the new name");
+    assert!(st.doc.styles.para(&name).is_none(), "old name is gone");
+}
+
+#[test]
+fn paragraph_style_edit_rejects_based_on_cycle() {
+    let mut s = session();
+    let a = s.execute("style.paragraph.create", &json!({"name": "A"})).unwrap()["name"].as_str().unwrap().to_string();
+    let b = s.execute("style.paragraph.create", &json!({"name": "B", "basedOn": a})).unwrap()["name"].as_str().unwrap().to_string();
+    let r = s.execute("style.paragraph.edit", &json!({"name": a, "basedOn": b}));
+    assert!(r.is_err(), "A based on B based on A must be rejected");
+}
+
+#[test]
+fn paragraph_style_delete_reassigns_affected_text() {
+    let mut s = session();
+    let name = s.execute("style.paragraph.create", &json!({"name": "Caption"})).unwrap()["name"].as_str().unwrap().to_string();
+    let sid = s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text"})).unwrap()["story"].as_u64().unwrap();
+    s.execute("text.insert", &json!({"text": "Hello, world"})).unwrap();
+    s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 0})).unwrap();
+    s.execute("style.paragraph.apply", &json!({"name": name})).unwrap();
+    {
+        let st = s.doc().unwrap();
+        let story = st.doc.stories.get(&designcraft_doc::StoryId(sid)).expect("story exists");
+        assert_eq!(story.paras[0].style, name, "style applied before delete");
+    }
+    s.execute("style.paragraph.delete", &json!({"name": name, "replaceWith": designcraft_doc::BASIC_PARAGRAPH})).unwrap();
+    let st = s.doc().unwrap();
+    assert!(st.doc.styles.para(&name).is_none(), "deleted style is gone");
+    let story = st.doc.stories.get(&designcraft_doc::StoryId(sid)).expect("story exists");
+    assert_eq!(story.paras[0].style, designcraft_doc::BASIC_PARAGRAPH, "affected paragraph reassigned to the replacement style");
+}
+
+#[test]
+fn paragraph_style_delete_rejects_builtin_styles() {
+    let mut s = session();
+    let r = s.execute("style.paragraph.delete", &json!({"name": designcraft_doc::BASIC_PARAGRAPH}));
+    assert!(r.is_err(), "built-in styles can't be deleted");
+}
+
+#[test]
+fn character_style_edit_persists_attrs_and_rename() {
+    let mut s = session();
+    let name = s.execute("style.character.create", &json!({"name": "Key Term", "chars": {"fontStyle": "Bold"}})).unwrap()["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.execute("style.character.edit", &json!({"name": name, "chars": {"tracking": 20.0}})).unwrap();
+    {
+        let st = s.doc().unwrap();
+        let style = st.doc.styles.char_style(&name).expect("style still exists");
+        assert_eq!(style.chars.tracking, Some(20.0), "edited attribute persisted");
+    }
+    // Renaming updates the style definition itself, and every place it's referenced.
+    s.execute("style.character.edit", &json!({"name": name, "rename": "Emphasis"})).unwrap();
+    let st = s.doc().unwrap();
+    assert!(st.doc.styles.char_style("Emphasis").is_some(), "renamed style exists under the new name");
+    assert!(st.doc.styles.char_style(&name).is_none(), "old name is gone");
+}
+
+#[test]
+fn character_style_edit_rejects_based_on_cycle() {
+    let mut s = session();
+    let a = s.execute("style.character.create", &json!({"name": "A"})).unwrap()["name"].as_str().unwrap().to_string();
+    let b = s.execute("style.character.create", &json!({"name": "B", "basedOn": a})).unwrap()["name"].as_str().unwrap().to_string();
+    let r = s.execute("style.character.edit", &json!({"name": a, "basedOn": b}));
+    assert!(r.is_err(), "A based on B based on A must be rejected");
+}
+
+#[test]
+fn character_style_delete_reassigns_affected_text() {
+    let mut s = session();
+    let name = s.execute("style.character.create", &json!({"name": "Key Term"})).unwrap()["name"].as_str().unwrap().to_string();
+    let r = s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text"})).unwrap();
+    let sid = r["story"].as_u64().unwrap();
+    s.execute("text.insert", &json!({"text": "Hello, world"})).unwrap();
+    s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 5})).unwrap();
+    s.execute("style.character.apply", &json!({"name": name})).unwrap();
+    {
+        let st = s.doc().unwrap();
+        let story = st.doc.stories.get(&designcraft_doc::StoryId(sid)).expect("story exists");
+        assert_eq!(story.chars[0].format.style, name, "style applied before delete");
+    }
+    s.execute("style.character.delete", &json!({"name": name, "replaceWith": designcraft_doc::NO_CHAR_STYLE})).unwrap();
+    let st = s.doc().unwrap();
+    assert!(st.doc.styles.char_style(&name).is_none(), "deleted style is gone");
+    let story = st.doc.stories.get(&designcraft_doc::StoryId(sid)).expect("story exists");
+    assert_eq!(story.chars[0].format.style, designcraft_doc::NO_CHAR_STYLE, "affected run reassigned to the replacement style");
+}
+
+#[test]
+fn character_style_delete_rejects_builtin_styles() {
+    let mut s = session();
+    let r = s.execute("style.character.delete", &json!({"name": designcraft_doc::NO_CHAR_STYLE}));
+    assert!(r.is_err(), "built-in styles can't be deleted");
+}
+
+#[test]
+fn character_style_delete_rejects_missing_unknown_and_self_replacement() {
+    let mut s = session();
+    let name = s.execute("style.character.create", &json!({"name": "Key Term"})).unwrap()["name"].as_str().unwrap().to_string();
+    assert!(s.execute("style.character.delete", &json!({"name": ""})).is_err(), "empty name is rejected");
+    assert!(s.execute("style.character.delete", &json!({"name": "No Such Style"})).is_err(), "unknown name is rejected");
+    assert!(s.execute("style.character.delete", &json!({"name": name, "replaceWith": "No Such Style"})).is_err(), "unknown replaceWith is rejected");
+    assert!(s.execute("style.character.delete", &json!({"name": name, "replaceWith": name})).is_err(), "replaceWith can't be the deleted style");
+}
+
+#[test]
+fn paragraph_style_delete_rejects_missing_unknown_and_self_replacement() {
+    let mut s = session();
+    let name = s.execute("style.paragraph.create", &json!({"name": "Caption"})).unwrap()["name"].as_str().unwrap().to_string();
+    assert!(s.execute("style.paragraph.delete", &json!({"name": ""})).is_err(), "empty name is rejected");
+    assert!(s.execute("style.paragraph.delete", &json!({"name": "No Such Style"})).is_err(), "unknown name is rejected");
+    assert!(s.execute("style.paragraph.delete", &json!({"name": name, "replaceWith": "No Such Style"})).is_err(), "unknown replaceWith is rejected");
+    assert!(s.execute("style.paragraph.delete", &json!({"name": name, "replaceWith": name})).is_err(), "replaceWith can't be the deleted style");
+}
+
+#[test]
+fn deleting_a_style_never_leaves_its_replacement_based_on_itself() {
+    let mut s = session();
+    let para = |s: &Session, n: &str| s.doc().unwrap().doc.styles.para(n).unwrap().based_on.clone();
+    s.execute("style.paragraph.create", &json!({"name": "Head"})).unwrap();
+    s.execute("style.paragraph.create", &json!({"name": "Sub", "basedOn": "Head"})).unwrap();
+    s.execute("style.paragraph.create", &json!({"name": "Minor", "basedOn": "Sub"})).unwrap();
+    // Minor is based on Sub; deleting Sub in favour of Minor gives Minor Sub's parent.
+    s.execute("style.paragraph.delete", &json!({"name": "Sub", "replaceWith": "Minor"})).unwrap();
+    assert_eq!(para(&s, "Minor").as_deref(), Some("Head"));
+    s.execute("style.character.create", &json!({"name": "Strong"})).unwrap();
+    s.execute("style.character.create", &json!({"name": "Stronger", "basedOn": "Strong"})).unwrap();
+    s.execute("style.character.delete", &json!({"name": "Strong", "replaceWith": "Stronger"})).unwrap();
+    let based = s.doc().unwrap().doc.styles.character.iter().find(|c| c.name == "Stronger").unwrap().based_on.clone();
+    assert_ne!(based.as_deref(), Some("Stronger"));
+}
+
+#[test]
+fn character_style_delete_reassigns_every_kind_of_reference() {
+    let mut s = session();
+    let name = s.execute("style.character.create", &json!({"name": "Key Term"})).unwrap()["name"].as_str().unwrap().to_string();
+    let repl = s.execute("style.character.create", &json!({"name": "Emphasis"})).unwrap()["name"].as_str().unwrap().to_string();
+    // Another character style's basedOn.
+    let based = s.execute("style.character.create", &json!({"name": "Strong", "basedOn": name})).unwrap()["name"].as_str().unwrap().to_string();
+    // A paragraph style's nested, nested line, GREP and drop cap styles, and the footnote reference style.
+    s.execute(
+        "style.paragraph.create",
+        &json!({"name": "Body", "para": {
+            "nestedStyles": [{"style": name, "through": true, "count": 1, "until": {"kind": "words"}}],
+            "grepStyles": [{"style": name, "pattern": "x"}],
+            "nestedLineStyles": [{"style": name, "lines": 1}],
+            "dropCapStyle": name}}),
+    )
+    .unwrap();
+    s.execute("footnote.options", &json!({"refCharStyle": name})).unwrap();
+    s.execute("style.character.delete", &json!({"name": name, "replaceWith": repl})).unwrap();
+    let st = s.doc().unwrap();
+    assert!(st.doc.styles.char_style(&name).is_none(), "deleted style is gone");
+    assert_eq!(st.doc.styles.char_style(&based).unwrap().based_on.as_deref(), Some(repl.as_str()), "basedOn redirected");
+    let body = st.doc.styles.para("Body").unwrap();
+    assert_eq!(body.para.nested_styles.as_ref().unwrap()[0].style, repl, "nested style redirected");
+    assert_eq!(body.para.nested_line_styles.as_ref().unwrap()[0].style, repl, "nested line style redirected");
+    assert_eq!(body.para.grep_styles.as_ref().unwrap()[0].style, repl, "grep style redirected");
+    assert_eq!(body.para.drop_cap_style.as_deref(), Some(repl.as_str()), "drop cap style redirected");
+    assert_eq!(st.doc.footnote_options.ref_char_style, repl, "footnote reference style redirected");
+}
+
+#[test]
+fn page_tool_selects_a_page_and_its_handles_preview_or_resize_it() {
+    use designcraft_tools::{CanvasLayout, Mods, PointerEvent, PointerKind};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 612, "height": 792, "facingPages": false})).unwrap();
+    let id = s.execute("frame.create", &json!({"rect": [400, 100, 500, 200]})).unwrap()["id"].as_u64().unwrap();
+    let frame = |s: &Session| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
+    let width = |s: &Session| s.doc().unwrap().doc.spreads[0].pages[0].width;
+    // The page on the canvas (a single page is centred on the spine).
+    let page = |s: &Session| {
+        let d = &s.doc().unwrap().doc;
+        CanvasLayout::new(d, false).page_rect(d, 0).unwrap()
+    };
+    s.set_tool("page");
+    let v = ViewInfo::at_zoom(1.0);
+    let ev = |kind, x: f64, y: f64, alt: bool| PointerEvent { mods: Mods { alt, ..Default::default() }, ..PointerEvent::new(kind, x, y) };
+    let drag = |s: &mut Session, from: (f64, f64), by: f64, alt: bool, check: &dyn Fn(&Session)| {
+        s.pointer(&ev(PointerKind::Down, from.0, from.1, alt), v).unwrap();
+        s.pointer(&ev(PointerKind::Drag, from.0 + by, from.1, alt), v).unwrap();
+        check(s);
+        s.pointer(&ev(PointerKind::Up, from.0 + by, from.1, alt), v).unwrap();
+    };
+    // A click selects the page.
+    let c = page(&s).center();
+    s.pointer(&ev(PointerKind::Down, c.x, c.y, false), v).unwrap();
+    s.pointer(&ev(PointerKind::Up, c.x, c.y, false), v).unwrap();
+    assert_eq!(s.doc().unwrap().selection.page, Some(0));
+    // A plain drag of the right handle previews the page's liquid rule and springs back.
+    s.execute("liquid.pageRule", &json!({"rule": "scale"})).unwrap();
+    let undo = s.doc().unwrap().history.undo.len();
+    let r = page(&s);
+    drag(&mut s, (r.x1, r.center().y), 612.0, false, &|s| {
+        assert_eq!(width(s), 1224.0, "previewed");
+        // Scale keeps proportions: only wider, so the frame is centred on the wider page.
+        assert_eq!(frame(s).x0, 706.0, "the Scale rule in the preview: {:?}", frame(s));
+    });
+    assert_eq!((width(&s), frame(&s)), (612.0, designcraft_geom::Rect::new(400.0, 100.0, 500.0, 200.0)), "sprung back");
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo, "nothing to undo");
+    // Alt-drag resizes; with the rule off the frame stays where it is.
+    s.execute("liquid.pageRule", &json!({"rule": "off"})).unwrap();
+    let r = page(&s);
+    drag(&mut s, (r.x1, r.center().y), 100.0, true, &|_| {});
+    assert_eq!(width(&s), 712.0);
+    assert_eq!(frame(&s).x0, 400.0);
+    // The left handle grows the page to the left: the frame keeps its place by the right edge.
+    let r = page(&s);
+    drag(&mut s, (r.x0, r.center().y), -100.0, true, &|_| {});
+    let pg = s.doc().unwrap().doc.spreads[0].pages[0].clone();
+    assert_eq!(pg.width, 812.0);
+    assert_eq!(frame(&s).x0 - pg.x, 500.0, "100 pt further from the page's left edge");
+    // A click on the pasteboard deselects the page.
+    let r = page(&s);
+    s.pointer(&ev(PointerKind::Down, r.x0 - 200.0, r.center().y, false), v).unwrap();
+    assert_eq!(s.doc().unwrap().selection.page, None);
+}
+
+#[test]
+fn page_size_keeps_objects_by_its_anchor() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 400, "height": 400, "facingPages": false})).unwrap();
+    let id = s.execute("frame.create", &json!({"rect": [100, 100, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+    let frame = |s: &Session| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
+    // Bottom-right stays put: 100 wider and 50 taller moves the frame 100 right and 50 down.
+    s.execute("layout.pageSize", &json!({"pages": [1], "width": 500, "height": 450, "anchor": 8})).unwrap();
+    assert_eq!(frame(&s), designcraft_geom::Rect::new(200.0, 150.0, 300.0, 250.0));
+    // The centre: half of it.
+    s.execute("layout.pageSize", &json!({"pages": [1], "width": 700, "height": 450, "anchor": 4})).unwrap();
+    assert_eq!(frame(&s).x0, 300.0);
+    assert!(s.execute("layout.pageSize", &json!({"pages": [1], "width": 700, "anchor": 9})).is_err());
+    assert!(s.execute("layout.selectPage", &json!({"page": 2})).is_err());
+    assert_eq!(s.execute("layout.selectPage", &json!({"page": 1})).unwrap()["page"], 1);
+}
+
+#[test]
+fn controlled_by_parent_takes_the_parent_pages_rule() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 400, "height": 400, "facingPages": false})).unwrap();
+    let id = s.execute("frame.create", &json!({"rect": [100, 100, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+    let frame = |s: &Session| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
+    // The page follows its parent; the parent page re-centres.
+    s.execute("liquid.pageRule", &json!({"rule": "controlledByParent", "pages": [1]})).unwrap();
+    s.edit(|d, _| {
+        std::sync::Arc::make_mut(&mut d.parents[0]).pages[0].liquid = designcraft_doc::LiquidRule::ReCenter;
+        Ok(())
+    })
+    .unwrap();
+    s.execute("layout.pageSize", &json!({"pages": [1], "width": 600})).unwrap();
+    assert_eq!(frame(&s).x0, 200.0, "re-centred: {:?}", frame(&s));
+    // Without a parent (or a parent that's also controlled by its parent) nothing moves.
+    s.execute("layout.pages.applyParent", &json!({"pages": [0], "parent": null})).unwrap();
+    s.execute("layout.pageSize", &json!({"pages": [1], "width": 800})).unwrap();
+    assert_eq!(frame(&s).x0, 200.0);
+    // Show Parent Page Overlay is a page option.
+    s.execute("layout.pageOptions", &json!({"pages": [1], "showParentOverlay": true})).unwrap();
+    assert!(s.doc().unwrap().doc.spreads[0].pages[0].show_parent_overlay);
+    assert!(s.execute("layout.pageOptions", &json!({"pages": [2], "showParentOverlay": true})).is_err());
+}
+
+#[test]
+fn page_tool_pins_and_locks_objects_on_object_based_pages() {
+    use designcraft_tools::{CanvasLayout, Mods, PointerEvent, PointerKind};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 612, "height": 792, "facingPages": false})).unwrap();
+    let id = s.execute("frame.create", &json!({"rect": [256, 72, 356, 132]})).unwrap()["id"].as_u64().unwrap();
+    s.execute("liquid.pageRule", &json!({"rule": "objectBased"})).unwrap();
+    s.execute("edit.deselectAll", &json!({})).unwrap();
+    s.set_tool("page");
+    let v = ViewInfo::at_zoom(1.0);
+    let ev =
+        |kind, p: designcraft_geom::Point, alt: bool| PointerEvent { mods: Mods { alt, ..Default::default() }, ..PointerEvent::new(kind, p.x, p.y) };
+    let canvas = |s: &Session| {
+        let d = &s.doc().unwrap().doc;
+        let l = CanvasLayout::new(d, false);
+        (
+            l.page_rect(d, 0).unwrap(),
+            l.xf(designcraft_doc::SpreadRef::Doc(0)).transform_rect_bbox(d.item(designcraft_doc::ItemId(id)).unwrap().bounds()),
+        )
+    };
+    let click = |s: &mut Session, p: designcraft_geom::Point| {
+        s.pointer(&ev(PointerKind::Down, p, false), v).unwrap();
+        s.pointer(&ev(PointerKind::Up, p, false), v).unwrap();
+    };
+    let liquid = |s: &Session| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().liquid;
+    // A click on the object selects it with its page; its pins and locks show.
+    let (_, o) = canvas(&s);
+    click(&mut s, o.center());
+    let sel = s.doc().unwrap().selection.clone();
+    assert_eq!((sel.page, sel.items.clone()), (Some(0), vec![designcraft_doc::ItemId(id)]));
+    assert!(
+        s.overlays(v)
+            .iter()
+            .any(|o| matches!(o, designcraft_tools::Overlay::LiquidPins { pins: [false, false, false, false], resize: [true, true], .. }))
+    );
+    // The right pin (14 px outside the right edge) and the width lock (10 px right of the centre).
+    click(&mut s, designcraft_geom::Point::new(o.x1 + 14.0, o.center().y));
+    click(&mut s, designcraft_geom::Point::new(o.center().x + 10.0, o.center().y));
+    let l = liquid(&s).unwrap();
+    assert!(l.pin_right && !l.resize_width && l.resize_height && !l.pin_left, "{l:?}");
+    // Alt-drag the page 100 pt wider: the pinned, width-locked frame keeps its size by the right edge.
+    let (p, _) = canvas(&s);
+    let right = designcraft_geom::Point::new(p.x1, p.center().y);
+    s.pointer(&ev(PointerKind::Down, right, true), v).unwrap();
+    s.pointer(&ev(PointerKind::Drag, right + designcraft_geom::Vec2::new(100.0, 0.0), true), v).unwrap();
+    s.pointer(&ev(PointerKind::Up, right + designcraft_geom::Vec2::new(100.0, 0.0), true), v).unwrap();
+    let d = &s.doc().unwrap().doc;
+    let (pg, b) = (&d.spreads[0].pages[0], d.item(designcraft_doc::ItemId(id)).unwrap().bounds());
+    assert_eq!(pg.width, 712.0);
+    assert!((b.width() - 100.0).abs() < 1e-6 && (pg.x + pg.width - b.x1 - 256.0).abs() < 1e-6, "{b:?}");
+    // Hovering a pin shows its tooltip.
+    let (_, o) = canvas(&s);
+    s.pointer(&ev(PointerKind::Move, designcraft_geom::Point::new(o.x1 + 14.0, o.center().y), false), v).unwrap();
+    assert!(s.overlays(v).iter().any(|o| matches!(o, designcraft_tools::Overlay::Tip { text, .. } if text.starts_with("Object is pinned"))));
+}
+
+#[test]
+fn duplicating_a_page_keeps_its_own_size_rule_guides_and_objects() {
+    // Chris Cicchino's Page Tool video (2:06): the letterhead page is duplicated, then resized.
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 252, "height": 144, "facingPages": false})).unwrap();
+    s.execute("layout.pages.insert", &json!({"count": 1})).unwrap();
+    s.execute("layout.pageSize", &json!({"pages": [2], "width": 612, "height": 792})).unwrap();
+    s.execute("liquid.pageRule", &json!({"rule": "scale", "pages": [2]})).unwrap();
+    s.execute("guide.add", &json!({"spread": 1, "page": 0, "orientation": "vertical", "position": 300})).unwrap();
+    s.execute("frame.create", &json!({"spread": 1, "rect": [100, 100, 200, 200]})).unwrap();
+    let r = s.execute("layout.pages.duplicateSpread", &json!({"spread": 1})).unwrap();
+    assert_eq!(r["page"], 2);
+    let d = s.doc().unwrap().doc.clone();
+    let (si, pi) = d.page_loc(2).unwrap();
+    let pg = &d.spreads[si].pages[pi];
+    assert_eq!((pg.width, pg.height, pg.liquid), (612.0, 792.0, designcraft_doc::LiquidRule::Scale));
+    assert_eq!(pg.guides.len(), 1);
+    assert_eq!(d.spreads[si].items.len(), 1);
+    // At the end of the document (the New Page button): the business card, not the last page's size.
+    let r = s.execute("layout.pages.duplicateSpread", &json!({"spread": 0, "atEnd": true})).unwrap();
+    assert_eq!(r["page"], 3);
+    let d = s.doc().unwrap().doc.clone();
+    let (si, pi) = d.page_loc(3).unwrap();
+    assert_eq!((d.spreads[si].pages[pi].width, d.spreads[si].pages[pi].height), (252.0, 144.0));
+}
+
 /// Load the text from a frame's out port with the Selection tool and click on the pasteboard:
 /// a new frame is threaded there and the overset text flows into it.
 #[test]
@@ -668,4 +1026,87 @@ fn type_tool_frames_snap_to_the_margins() {
     let r = items.last().unwrap().bounds();
     assert!((r.x0 - margin.x0).abs() < 1e-6 && (r.y0 - margin.y0).abs() < 1e-6, "press point {r:?} vs {margin:?}");
     assert!((r.x1 - margin.x1).abs() < 1e-6, "right edge {} vs {}", r.x1, margin.x1);
+}
+
+#[test]
+fn duplicating_a_page_to_an_index_is_one_undo_step() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"facingPages": false})).unwrap();
+    s.execute("layout.pages.insert", &json!({"count": 2})).unwrap();
+    for (page, width) in [(1, 300), (2, 400), (3, 500)] {
+        s.execute("layout.pageSize", &json!({"pages": [page], "width": width, "height": 600})).unwrap();
+    }
+    let widths = |s: &Session| {
+        let d = &s.doc().unwrap().doc;
+        (0..d.page_count()).map(|i| d.page_loc(i).map(|(si, pi)| d.spreads[si].pages[pi].width)).collect::<Option<Vec<_>>>().unwrap()
+    };
+    // Backwards: the last page copied to the front.
+    let r = s.execute("layout.pages.duplicateSpread", &json!({"spread": 2, "to": 0})).unwrap();
+    assert_eq!(r["page"], 0);
+    assert_eq!(widths(&s), [500.0, 300.0, 400.0, 500.0]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(widths(&s), [300.0, 400.0, 500.0]);
+    // Forwards: the first page copied to the end.
+    s.execute("layout.pages.duplicateSpread", &json!({"spread": 0, "to": 3})).unwrap();
+    assert_eq!(widths(&s), [300.0, 400.0, 500.0, 300.0]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(widths(&s), [300.0, 400.0, 500.0]);
+    // Past the end: refused, nothing changes.
+    assert!(s.execute("layout.pages.duplicateSpread", &json!({"spread": 0, "to": 4})).is_err());
+    assert_eq!(widths(&s), [300.0, 400.0, 500.0]);
+}
+
+#[test]
+fn the_type_tool_draws_a_text_frame_over_a_locked_frame() {
+    // Adobe's "Set up a modern magazine layout" (4:03): with the page frame locked (Cmd+L), the
+    // Type tool draws text frames on top of it; the locked frame stays an empty frame.
+    use designcraft_tools::{PointerEvent, PointerKind, SnapView};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 612, "height": 792, "facingPages": false})).unwrap();
+    let big = s.execute("frame.create", &json!({"rect": [36, 36, 576, 756], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+    s.execute("object.stroke", &json!({"ids": [big], "swatch": "[Black]", "weight": 6})).unwrap();
+    s.execute("object.lock", &json!({"ids": [big]})).unwrap();
+    s.execute("edit.deselectAll", &json!({})).unwrap();
+    s.set_tool("type");
+    let v = ViewInfo { snap: SnapView::OFF, ..ViewInfo::at_zoom(1.0) };
+    let layout = s.layout();
+    let at = |x: f64, y: f64| layout.to_canvas(designcraft_doc::SpreadRef::Doc(0), designcraft_geom::Point::new(x, y));
+    let (a, b) = (at(100.0, 100.0), at(300.0, 200.0));
+    s.pointer(&PointerEvent::new(PointerKind::Down, a.x, a.y), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Drag, 200.0 + a.x - 100.0, a.y + 50.0), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Drag, b.x, b.y), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Up, b.x, b.y), v).unwrap();
+    let d = &s.doc().unwrap().doc;
+    let it = d.item(designcraft_doc::ItemId(big)).unwrap();
+    assert!(matches!(it.content, designcraft_doc::Content::Unassigned), "the locked frame stays empty");
+    let frames: Vec<_> = d.spreads[0].items.iter().filter(|i| i.is_text_frame()).collect();
+    assert_eq!(frames.len(), 1, "a new text frame");
+    let r = frames[0].bounds();
+    assert!((r.x0 - 100.0).abs() < 1e-6 && (r.y1 - 200.0).abs() < 1e-6, "{r:?}");
+    // The engine refuses to turn a locked empty frame into a text frame.
+    assert!(s.execute("text.placeCaret", &json!({"frame": big, "point": [300, 400]})).is_err());
+    // Unlocked, a press inside converts it, as before.
+    s.execute("object.unlockAll", &json!({})).unwrap();
+    s.execute("text.placeCaret", &json!({"frame": big, "point": [300, 400]})).unwrap();
+    assert!(s.doc().unwrap().doc.item(designcraft_doc::ItemId(big)).unwrap().is_text_frame());
+}
+
+/// A line is set when its baseline fits in the frame; its descenders may hang below the frame, as
+/// in InDesign. A 103 pt heading in a 78.5 pt frame (Cap Height first baseline) was overset.
+#[test]
+fn a_line_fits_when_its_baseline_does() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let overset = |s: &mut Session, height: f64| {
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 400, 36.0 + height], "content": "text", "text": "Gyp"})).unwrap();
+        s.execute("object.textFrameOptions", &json!({"ids": [r["id"]], "firstBaseline": "capHeight", "inset": 0})).unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 3})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"size": 103}})).unwrap();
+        let st = s.execute("story.get", &json!({"story": r["story"]})).unwrap();
+        !st["overset"].is_null()
+    };
+    // Cap height of the default font at 103 pt is about 70 pt: the baseline fits in 78.5 pt, the
+    // descent (about 25 pt more) doesn't.
+    assert!(!overset(&mut s, 78.5), "the line is set; its descenders hang below the frame");
+    assert!(overset(&mut s, 50.0), "a baseline below the frame still oversets the line");
 }
