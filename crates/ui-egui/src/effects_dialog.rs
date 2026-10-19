@@ -83,7 +83,7 @@ pub fn open(app: &mut DesignApp, page: &str) {
 
 /// Every effect's settings, those still at their defaults included (the document leaves them out).
 fn effects_json(e: &designcraft_doc::Effects) -> Value {
-    use designcraft_doc::{Bevel, DirectionalFeather, DropShadow, GradientFeather, InnerGlow, InnerShadow, OuterGlow, Satin};
+    use designcraft_doc::{Bevel, DirectionalFeather, DropShadow, FeatherOptions, GradientFeather, InnerGlow, InnerShadow, OuterGlow, Satin};
     let mut fx = serde_json::to_value(e).unwrap_or_else(|_| json!({}));
     let defaults = [
         ("dropShadow", serde_json::to_value(DropShadow::default())),
@@ -94,6 +94,7 @@ fn effects_json(e: &designcraft_doc::Effects) -> Value {
         ("satin", serde_json::to_value(Satin::default())),
         ("directionalFeather", serde_json::to_value(DirectionalFeather::default())),
         ("gradientFeather", serde_json::to_value(GradientFeather::default())),
+        ("featherOptions", serde_json::to_value(FeatherOptions::default())),
     ];
     for (k, v) in defaults {
         if !fx[k].is_object()
@@ -144,13 +145,6 @@ pub fn confirm(app: &mut DesignApp, d: &Dialog) -> Result<Value, String> {
     app.run("object.effects", params(d))
 }
 
-/// Close without applying: the page shows what it showed before the dialog opened.
-pub fn cancel(app: &mut DesignApp, d: &Dialog) {
-    if d.fields.contains_key(PREVIEWED) {
-        app.session.cancel_interaction();
-    }
-}
-
 /// Preview on: the effects show on the page (redone when a value changes); off: they go.
 fn preview(app: &mut DesignApp, d: &mut Dialog) {
     let shown = d.fields.get(PREVIEWED).cloned();
@@ -184,8 +178,6 @@ fn num(d: &Dialog, path: &[&str]) -> f64 {
     v.as_f64().unwrap_or(0.0)
 }
 
-/// Set the value at `path` in the dialog's effects, making the objects on the way (an empty path
-/// sets nothing).
 fn set(d: &mut Dialog, path: &[&str], value: Value) {
     let Some((last, parents)) = path.split_last() else { return };
     let Some(mut v) = d.fields.get_mut("fx") else { return };
@@ -368,6 +360,23 @@ fn page_ui(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog, page: &str) {
             let key = page;
             heading(ui, &tr("Blending"));
             grid("b").show(ui, |ui| {
+                // Inner Glow: its blend mode (Screen, as InDesign starts it).
+                if key == "innerGlow" {
+                    row(ui, "Mode:");
+                    let cur = d.fields.get("fx").and_then(|f| f["innerGlow"]["mode"].as_str()).unwrap_or("Screen").to_string();
+                    let label = |m: &designcraft_color::BlendMode| {
+                        serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+                    };
+                    let shown = designcraft_color::BlendMode::ALL.iter().find(|m| label(m) == cur).map_or("Screen", |m| m.label());
+                    egui::ComboBox::from_id_salt("fx_glow_mode").selected_text(tr(shown)).width(150.0).show_ui(ui, |ui| {
+                        for m in designcraft_color::BlendMode::ALL {
+                            if ui.selectable_label(label(&m) == cur, tr(m.label())).clicked() {
+                                set(d, &["innerGlow", "mode"], json!(label(&m)));
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
                 row(ui, "Color:");
                 swatch(app, ui, d, &[key, "color"]);
                 row(ui, "Opacity:");
@@ -384,6 +393,19 @@ fn page_ui(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog, page: &str) {
                 } else {
                     row(ui, "Choke:");
                     percent(ui, d, &[key, "choke"]);
+                    ui.end_row();
+                    row(ui, "Technique:");
+                    let cur = d.fields.get("fx").and_then(|f| f["innerGlow"]["technique"].as_str()).unwrap_or("softer").to_string();
+                    egui::ComboBox::from_id_salt("fx_technique").selected_text(tr(if cur == "precise" { "Precise" } else { "Softer" })).show_ui(
+                        ui,
+                        |ui| {
+                            for (v, l) in [("softer", "Softer"), ("precise", "Precise")] {
+                                if ui.selectable_label(cur == v, tr(l)).clicked() {
+                                    set(d, &["innerGlow", "technique"], json!(v));
+                                }
+                            }
+                        },
+                    );
                     ui.end_row();
                     row(ui, "Source:");
                     let mut center = d.fields.get("fx").is_some_and(|f| f["innerGlow"]["center"].as_bool().unwrap_or(false));
@@ -458,6 +480,24 @@ fn page_ui(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog, page: &str) {
             grid("o").show(ui, |ui| {
                 row(ui, "Feather Width:");
                 measure(ui, d, &["feather"], unit);
+                ui.end_row();
+                row(ui, "Choke:");
+                percent(ui, d, &["featherOptions", "choke"]);
+                ui.end_row();
+                row(ui, "Corners:");
+                let cur = d.fields.get("fx").and_then(|f| f["featherOptions"]["corners"].as_str()).unwrap_or("diffused").to_string();
+                let shown = match cur.as_str() {
+                    "sharp" => "Sharp",
+                    "rounded" => "Rounded",
+                    _ => "Diffused",
+                };
+                egui::ComboBox::from_id_salt("fx_corners").selected_text(tr(shown)).show_ui(ui, |ui| {
+                    for (v, l) in [("sharp", "Sharp"), ("rounded", "Rounded"), ("diffused", "Diffused")] {
+                        if ui.selectable_label(cur == v, tr(l)).clicked() {
+                            set(d, &["featherOptions", "corners"], json!(v));
+                        }
+                    }
+                });
                 ui.end_row();
             });
         }
@@ -593,6 +633,15 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn setting_an_empty_path_changes_nothing() {
+        let mut d = Dialog::new(ID, json!({"fx": {"dropShadow": {"distance": 7.0}}}));
+        set(&mut d, &[], json!(1));
+        assert_eq!(d.fields.get("fx"), Some(&json!({"dropShadow": {"distance": 7.0}})));
+        set(&mut d, &["dropShadow", "size"], json!(3.0));
+        assert_eq!(num(&d, &["dropShadow", "size"]), 3.0);
+    }
+
     fn app_with_frame() -> (DesignApp, u64) {
         let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({})).unwrap();
@@ -667,7 +716,7 @@ mod tests {
         ] {
             assert!(texts.iter().any(|x| x.trim() == t), "{t}: {texts:?}");
         }
-        assert!(texts.iter().any(|x| x.contains("0.097 in")), "distance in inches: {texts:?}");
+        assert!(texts.iter().any(|x| x.contains("0.0972 in")), "distance in inches: {texts:?}");
         // Preview: the shadow is on the page while the dialog is open, without an undo step.
         frame(&mut app, &ctx);
         assert!(fx(&app).inner_shadow.on);

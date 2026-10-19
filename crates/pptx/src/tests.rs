@@ -204,7 +204,7 @@ fn pictures_are_cropped_to_their_frames() {
             link: None,
             data: Arc::new(png(200, 100)),
             pixels: Some((200, 100)),
-            page: 0,
+            ..Default::default()
         }),
     );
     let id = rect_item(&mut d, Rect::new(100.0, 100.0, 200.0, 200.0), Shape::Rectangle);
@@ -218,6 +218,9 @@ fn pictures_are_cropped_to_their_frames() {
             auto_fit: designcraft_doc::Fitting::None,
             fit_align: 0,
             crop: [0.0; 4],
+            clip: None,
+            wrap: Default::default(),
+            fill: Default::default(),
         });
     });
     let mut z = export(&d, &PptxOptions::default());
@@ -226,6 +229,14 @@ fn pictures_are_cropped_to_their_frames() {
     assert!(s.contains("<a:srcRect l=\"25000\" t=\"0\" r=\"25000\" b=\"0\"/>"), "{s}");
     let rels = part(&mut z, "ppt/slides/_rels/slide1.xml.rels");
     assert!(rels.contains("../media/image1.png"));
+}
+
+#[test]
+fn maximal_page_index_is_an_error() {
+    let d = Document::new(&NewDocument::default());
+    let options = PptxOptions { pages: Some(vec![usize::MAX]), ..Default::default() };
+    let result = export_pptx(&d, &Cache::new(), &options);
+    assert!(matches!(result, Err(PptxError::BadPage(usize::MAX))));
 }
 
 #[test]
