@@ -597,18 +597,24 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let opaque = bool_or(p, "opaque", false);
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        i.effects = Default::default();
-                        if opaque {
-                            i.opacity = 1.0;
-                            i.blend = Default::default();
+                let ids = targets(s, p)?;
+                s.edit(|d, _| {
+                    let mut changed = 0;
+                    for id in &ids {
+                        // Locked objects keep their effects, as with `object.effects`.
+                        if !d.item(*id).is_some_and(|it| unlocked(d, it)) {
+                            continue;
                         }
-                    },
-                    false,
-                )
+                        let Some(it) = d.item_mut(*id) else { continue };
+                        it.effects = Default::default();
+                        if opaque {
+                            it.opacity = 1.0;
+                            it.blend = Default::default();
+                        }
+                        changed += 1;
+                    }
+                    Ok(json!({"changed": changed}))
+                })
             }
         ),
         cmd!("object.feather", "Basic Feather", ["Object", "Effects"], None, "{width (0 = off), ids?}", has_selection, |s, p| {
@@ -5613,5 +5619,13 @@ mod clear_effects_tests {
         assert_eq!((it.opacity, it.blend), (1.0, designcraft_color::BlendMode::Normal));
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(item(&s).opacity, 0.5);
+        // A locked object named by `ids` keeps its effects and transparency.
+        s.execute("object.effects", &json!({"ids": [id], "effects": {"feather": 4}})).unwrap();
+        s.execute("object.lock", &json!({"ids": [id]})).unwrap();
+        let r = s.execute("object.clearEffects", &json!({"ids": [id], "opaque": true})).unwrap();
+        assert_eq!(r["changed"], 0);
+        let it = item(&s);
+        assert!(it.effects.any());
+        assert_eq!((it.opacity, it.blend), (0.5, designcraft_color::BlendMode::Multiply));
     }
 }
