@@ -32,7 +32,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Copy", "Copiar"),
     ("Paste", "Colar"),
     ("Noise:", "Ruído:"),
-    ("Object Knocks Out Shadow", "O objeto vaza a sombra"),
+    ("Object Knocks Out Shadow", "O objeto bloqueia a própria sombra"),
     ("Shadow Honors Other Effects", "A sombra respeita outros efeitos"),
     ("Paste Vector Art", "Colar arte vetorial"),
     ("Baseline Options", "Opções de linha de base"),
