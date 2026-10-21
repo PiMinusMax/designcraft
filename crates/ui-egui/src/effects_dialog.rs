@@ -204,10 +204,41 @@ fn percent(ui: &mut egui::Ui, d: &mut Dialog, path: &[&str]) {
 
 fn angle(ui: &mut egui::Ui, d: &mut Dialog, path: &[&str], enabled: bool, global: f64) {
     let mut v = if enabled { num(d, path) } else { global };
-    let r = ui.add_enabled(enabled, egui::DragValue::new(&mut v).range(-180.0..=180.0).suffix("°").max_decimals(1));
-    if r.changed() {
-        set(d, path, json!(v));
+    ui.horizontal(|ui| {
+        if let Some(a) = angle_dial(ui, v, enabled) {
+            v = a;
+            set(d, path, json!(v));
+        }
+        let r = ui.add_enabled(enabled, egui::DragValue::new(&mut v).range(-180.0..=180.0).suffix("°").max_decimals(1));
+        if r.changed() {
+            set(d, path, json!(v));
+        }
+    });
+}
+
+/// InDesign's angle dial: a circle with a radius pointing where the light comes from (0° to the
+/// right, counter-clockwise). A click or a drag on it points it at the pointer.
+fn angle_dial(ui: &mut egui::Ui, deg: f64, enabled: bool) -> Option<f64> {
+    let sense = if enabled { egui::Sense::click_and_drag() } else { egui::Sense::hover() };
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), sense);
+    resp.widget_info(|| egui::WidgetInfo::slider(enabled, deg, "Angle"));
+    let col = if enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
+    let (c, rad) = (r.center(), 11.0);
+    ui.painter().circle_stroke(c, rad, egui::Stroke::new(1.2, col));
+    let a = deg.to_radians() as f32;
+    ui.painter().line_segment([c, c + egui::vec2(a.cos(), -a.sin()) * rad], egui::Stroke::new(1.4, col));
+    if enabled && (resp.dragged() || resp.clicked()) {
+        return resp.interact_pointer_pos().and_then(|p| dial_angle(c, p));
     }
+    None
+}
+
+/// The angle a dial at `c` points at for the pointer at `p`, in whole degrees (−180 to 180,
+/// counter-clockwise from the right); none too close to the centre to tell.
+fn dial_angle(c: egui::Pos2, p: egui::Pos2) -> Option<f64> {
+    let d = p - c;
+    // Straight left is 180° (not −180°, which a negative zero would give).
+    (d.length() > 2.0).then(|| f64::from((-d.y).atan2(d.x)).to_degrees().round()).map(|a| if a <= -180.0 { 180.0 } else { a })
 }
 
 fn flag(ui: &mut egui::Ui, d: &mut Dialog, path: &[&str], label: &str) {
@@ -754,6 +785,19 @@ mod tests {
         let fx = app.session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().effects.clone();
         assert!(fx.outer_glow.on);
         assert_eq!(fx.outer_glow.mode, designcraft_color::BlendMode::Normal);
+    }
+
+    /// The angle dial points where the pointer is, as InDesign's: right is 0°, up 90°, left 180°,
+    /// down −90°, upper left 135°.
+    #[test]
+    fn the_angle_dial_points_at_the_pointer() {
+        let c = egui::pos2(100.0, 100.0);
+        assert_eq!(dial_angle(c, egui::pos2(120.0, 100.0)), Some(0.0));
+        assert_eq!(dial_angle(c, egui::pos2(100.0, 80.0)), Some(90.0));
+        assert_eq!(dial_angle(c, egui::pos2(80.0, 100.0)), Some(180.0));
+        assert_eq!(dial_angle(c, egui::pos2(100.0, 120.0)), Some(-90.0));
+        assert_eq!(dial_angle(c, egui::pos2(90.0, 90.0)), Some(135.0));
+        assert_eq!(dial_angle(c, egui::pos2(101.0, 100.0)), None, "too close to the centre");
     }
 
     #[test]
