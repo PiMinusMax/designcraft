@@ -2700,6 +2700,9 @@ impl<'r> Importer<'r> {
                 spread: ds.num("Spread").unwrap_or(def.spread),
                 global_light: false,
                 mode: ds.get("BlendMode").map_or(def.mode, names::blend_in),
+                noise: finite(ds.num("Noise")).unwrap_or(0.0).clamp(0.0, 100.0),
+                knockout: ds.boolean("KnockedOut").unwrap_or(def.knockout),
+                honors_effects: ds.boolean("HonorOtherEffects").unwrap_or(false),
             };
         }
         if let Some(f) = t.find("FeatherSetting")
