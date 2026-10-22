@@ -974,6 +974,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
     if !has_worker || app.canvas.shown.is_none() || mode_changed || (doc_changed && zoom_same && sync_ok && patch_ok) {
         let t0 = crate::now_ms();
         let Some((doc, placed, w, h, view, opts)) = job(app) else { return };
+        let _t = designcraft_render::trace::span(20.0, || format!("canvas render on the UI thread {w}x{h} (edit, first frame or mode switch)"));
         let img = app.canvas.renderer.render(&doc, &app.session.cache, &placed, w, h, view, &opts);
         upload(app, ctx, img);
         app.canvas.shown = Some(target);
@@ -1097,6 +1098,7 @@ fn render_worker_spawn(ctx: &egui::Context) -> Option<crate::render_worker::Work
 }
 
 fn upload(app: &mut DesignApp, ctx: &egui::Context, mut img: designcraft_render::Rendered) {
+    let _t = designcraft_render::trace::span(15.0, || format!("upload canvas texture {}x{}", img.width, img.height));
     if app.ui.proof_colors {
         designcraft_render::proof_view(&mut img, &app.ui.proof_setup);
     }

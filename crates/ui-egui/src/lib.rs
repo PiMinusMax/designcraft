@@ -755,6 +755,11 @@ pub struct CanvasCache {
     pub pixels_generation: u64,
 }
 
+/// Local profiling: `DESIGNCRAFT_TRACE=1` (see `designcraft_render::trace`).
+pub fn trace_init() {
+    designcraft_render::trace::init();
+}
+
 #[derive(Default, Clone, Copy, Debug, Serialize)]
 pub struct Perf {
     pub frame_ms: f64,
@@ -1179,6 +1184,7 @@ impl DesignApp {
 
     /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        let _t = designcraft_render::trace::span(20.0, || format!("command {id}"));
         // Recovery data saved or opened by command (control channel, a script) while the timed
         // save is being written: that one is recorded first, so an older snapshot can't land last.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1582,6 +1588,7 @@ impl DesignApp {
     /// real `run_ui` pass calls. A hidden `run_logic` tick also reports pass index zero, so the
     /// pass index alone cannot identify a UI pass.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        let _t = designcraft_render::trace::span(50.0, || "UI frame: logic".to_string());
         #[cfg(test)]
         {
             self.logic_tick_ticks += 1;

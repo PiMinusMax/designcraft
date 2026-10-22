@@ -422,6 +422,7 @@ impl Renderer {
             return;
         }
         let Some(o) = offscreen(f.view.transform_rect_bbox(reach), spread, ctx.width(), ctx.height()) else { return };
+        let _t = crate::trace::span(10.0, || format!("fx offscreen {}x{} scale {:.2} blur {:.0}px (single-threaded)", o.width, o.height, o.scale, spread));
         let mut off = RenderContext::new_with(o.width, o.height, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
         let view = Affine::scale(1.0 / o.scale) * Affine::translate((-o.x0, -o.y0)) * f.view;
         let shifted = Frame { mt: false, view, px: f.px * o.scale, ..*f };

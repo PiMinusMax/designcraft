@@ -26,6 +26,7 @@ pub use vello_cpu;
 mod blendspace;
 mod colorize;
 pub mod damage;
+pub mod trace;
 mod fx;
 mod grid;
 
@@ -342,6 +343,7 @@ impl Renderer {
         opts: &RenderOptions,
     ) -> Rendered {
         let start = now();
+        let _t = trace::span(30.0, || format!("render {width}x{height} plate {:?} blend-view {}", opts.plate, opts.blend_space_view));
         RICH_BLACK.with(|r| r.set(opts.rich_black));
         PLATE.with(|p| p.set(opts.plate));
         if let Some(hit) = self.cmyk_view.as_ref().filter(|entry| entry.matches(doc, spreads, width, height, view, opts, self.threads)) {
@@ -453,6 +455,7 @@ impl Renderer {
     }
 
     fn draw_spread(&mut self, ctx: &mut RenderContext, f: &Frame, sr: SpreadRef) {
+        let _t = trace::span(30.0, || format!("spread {sr:?} plate {:?}", PLATE.with(|p| p.get())));
         let doc = f.doc;
         let Some(sp) = doc.spread(sr) else { return };
         // Paper.
@@ -547,6 +550,30 @@ impl Renderer {
     }
 
     fn draw_item(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, parent: Affine, page: ShownOn) {
+        let _t = trace::span(15.0, || {
+            let kind = match &it.content {
+                Content::Text(_) => "text",
+                Content::Graphic(_) => "image",
+                Content::Group { .. } if it.is_group() => "group",
+                Content::Group { .. } => "frame with pasted items",
+                Content::Unassigned => "shape",
+            };
+            let e = &it.effects;
+            let fx: Vec<&str> = [
+                (e.drop_shadow.on, "shadow"),
+                (e.outer_glow.on, "glow"),
+                (e.inner_shadow.on, "inner-shadow"),
+                (e.inner_glow.on, "inner-glow"),
+                (e.feather > 0.0, "feather"),
+                (e.bevel.on, "bevel"),
+                (e.satin.on, "satin"),
+                (e.gradient_feather.on, "grad-feather"),
+            ]
+            .into_iter()
+            .filter_map(|(on, n)| on.then_some(n))
+            .collect();
+            format!("item {} {kind}{}{}", it.id.0, if fx.is_empty() { String::new() } else { format!(" fx[{}]", fx.join(",")) }, if it.blend != DcBlend::Normal || it.opacity < 0.999 { " transparent" } else { "" })
+        });
         if self.drawing_items.len() >= 64 || self.drawing_items.contains(&it.id) {
             return;
         }
@@ -644,6 +671,7 @@ impl Renderer {
         if let Some(cs) = self.stories.get(&key) {
             return cs.clone();
         }
+        let _t = trace::span(15.0, || format!("compose story {}", sid.0));
         let cs = f.cache.get_on(f.doc, sid, page);
         self.stories.insert(key, cs.clone());
         cs
@@ -1112,6 +1140,7 @@ fn plate_pixmap(pm: &std::sync::Arc<vello_cpu::Pixmap>, plate: u8) -> std::sync:
     let table = cmyk_table();
     #[cfg(test)]
     PLATE_CONVERSIONS.with(|n| n.set(n.get() + 1));
+    let _t = trace::span(10.0, || format!("convert image {}x{} to plate {plate}", pm.width(), pm.height()));
     let data = plate_pixels(pm.data(), &table, plate);
     let out = std::sync::Arc::new(vello_cpu::Pixmap::from_parts(data, pm.width(), pm.height()));
     let bytes = plate_bytes(pm.width(), pm.height());
@@ -1270,6 +1299,7 @@ pub fn decode_pixmap(bytes: &[u8]) -> Option<Pixmap> {
 
 /// [`decode_pixmap`] for page `page` of a PDF (other formats have one page).
 pub fn decode_pixmap_page(bytes: &[u8], page: u32) -> Option<Pixmap> {
+    let _t = trace::span(10.0, || format!("decode image ({} KB, page {page})", bytes.len() / 1024));
     // Documents retain the EPS source; only display its TIFF preview or placeholder.
     let proxy = if designcraft_images::is_eps(bytes) { Some(designcraft_images::eps_proxy(bytes)?.0) } else { None };
     let bytes = proxy.as_deref().unwrap_or(bytes);
@@ -1657,6 +1687,7 @@ pub fn proof_view(img: &mut Rendered, setup: &designcraft_color::cms::ProofSetup
 /// A CMYK transparency blend space on screen: the pixels of `area` (device space) through the
 /// working CMYK profile and back, as a spread composited in that space looks.
 fn blend_space_view(img: &mut Rendered, area: Rect) {
+    let _t = trace::span(10.0, || format!("CMYK blend-space view {}x{}", area.width().round(), area.height().round()));
     use designcraft_color::cms::{ProofSetup, ProofTarget};
     let lut = designcraft_color::cms::active().proof_lut(&ProofSetup { target: ProofTarget::WorkingCmyk, ..Default::default() });
     let (w, h) = (img.width as i64, img.height as i64);
