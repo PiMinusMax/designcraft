@@ -1860,9 +1860,15 @@ fn draw_inverse_highlight(
     let Some(st) = app.session.active() else { return };
     let preview = app.ui.screen_mode != ScreenMode::Normal;
     let back = Tokens::get(ctx).pasteboard;
-    // Everything that changes the colours the canvas shows changes the highlight too.
-    let display =
-        (app.ui.proof_colors.then(|| format!("{:?}", app.ui.proof_setup)), app.ui.separation, app.ui.ink_limit.map(f32::to_bits), back.to_array());
+    // Everything that changes the colours the canvas shows changes the highlight too: the display
+    // options the canvas texture is redrawn for (Rich Black, Overprint Preview, quality …) and
+    // the proof setup, ink limit and pasteboard behind them.
+    let display = (
+        format!("{:?}", display_key(app)),
+        app.ui.proof_colors.then(|| format!("{:?}", app.ui.proof_setup)),
+        app.ui.ink_limit.map(f32::to_bits),
+        back.to_array(),
+    );
     let key = egui::Id::new(("inverse_sel", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, story.0))
         .with(&display)
         .with((runs.iter().map(|r| r.2.len() + r.3.len() * 7919).sum::<usize>(), w, h, preview))
@@ -4243,6 +4249,28 @@ mod tests {
         }
         assert!(light > dark, "a light highlight under the selected white text: {light} light, {dark} dark");
         assert!(dark > 0, "with the letters dark on it");
+    }
+
+    /// The highlight is drawn from a render of what lies under it: a display option that changes
+    /// that render (Overprint Preview here) draws it again instead of keeping the old pixels.
+    #[test]
+    fn the_text_highlight_follows_the_display_options() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", serde_json::json!({})).unwrap();
+        app.run("frame.create", serde_json::json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Some text", "caret": true})).unwrap();
+        app.run("edit.selectAll", serde_json::json!({})).unwrap();
+        let mut h = crate::test_window::open(app, vec2(900.0, 600.0));
+        h.run_steps(6);
+        let cached = |h: &Harness<'_, crate::test_window::Window>| {
+            h.ctx.data(|d| d.get_temp::<(egui::Id, egui::TextureHandle)>(egui::Id::new("inverse_sel_tex"))).map(|(k, _)| k)
+        };
+        let before = cached(&h).expect("the highlight is drawn");
+        h.run_steps(2);
+        assert_eq!(cached(&h), Some(before), "unchanged: the cached highlight is kept");
+        h.state_mut().app.ui.overprint_preview = !h.state().app.ui.overprint_preview;
+        h.run_steps(2);
+        let after = cached(&h).expect("the highlight is drawn");
+        assert_ne!(after, before, "a new display option: the highlight is drawn again");
     }
 
     #[test]
