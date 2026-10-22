@@ -159,6 +159,7 @@ pub fn parse_measure_rel(input: &str, default: Unit, percent_base: Option<f64>) 
     if s.is_empty() {
         return Err(err());
     }
+    let s = decimal_comma(&s);
     // Tokenize into terms separated by + and - (a leading sign belongs to the first term).
     let mut terms: Vec<(f64, String)> = Vec::new();
     let mut sign = 1.0;
@@ -182,6 +183,22 @@ pub fn parse_measure_rel(input: &str, default: Unit, percent_base: Option<f64>) 
         total += sign * parse_product(&term, default, percent_base).ok_or_else(err)?;
     }
     if total.is_finite() { Ok(total) } else { Err(err()) }
+}
+
+/// A comma between two digits read as a decimal point (`0,5 cm`, `12,75`), as typed in most
+/// European languages, when the text has no dot of its own (so `1.000,5` isn't guessed at).
+pub fn decimal_comma(s: &str) -> String {
+    if s.contains('.') {
+        return s.to_string();
+    }
+    let c: Vec<char> = s.chars().collect();
+    c.iter()
+        .enumerate()
+        .map(|(i, &ch)| {
+            let digit = |j: Option<usize>| j.and_then(|j| c.get(j)).is_some_and(|d| d.is_ascii_digit());
+            if ch == ',' && digit(i.checked_sub(1)) && digit(Some(i + 1)) { '.' } else { ch }
+        })
+        .collect()
 }
 
 /// `a*b/c`: the first factor carries the unit; later factors are plain numbers (or measurements,
@@ -324,6 +341,22 @@ mod tests {
     }
 
     /// Inches show four decimals, as InDesign's fields do; other units three.
+    /// A decimal comma, as German, French or Spanish keyboards type it, reads as a decimal point
+    /// (it was rejected, so the field quietly kept its old value).
+    #[test]
+    fn a_decimal_comma_reads_as_a_decimal_point() {
+        let cm = Unit::Centimeters.to_pt(1.0);
+        assert!((parse_measure("0,1", Unit::Centimeters).unwrap() - 0.1 * cm).abs() < 1e-9);
+        assert!((parse_measure("0,5 cm", Unit::Points).unwrap() - 0.5 * cm).abs() < 1e-9);
+        assert!((parse_measure("1,5+0,25", Unit::Points).unwrap() - 1.75).abs() < 1e-9);
+        assert!((parse_measure("12,5mm", Unit::Points).unwrap() - Unit::Millimeters.to_pt(12.5)).abs() < 1e-9);
+        // With a dot of its own the text isn't guessed at, and a comma without digits on both
+        // sides stays an error.
+        assert!(parse_measure("1.000,5", Unit::Points).is_err());
+        assert!(parse_measure(",5", Unit::Points).is_err());
+        assert!(parse_measure("5,", Unit::Points).is_err());
+    }
+
     #[test]
     fn inches_show_four_decimals() {
         assert_eq!(format_measure(12.0, Unit::Inches), "0.1667 in");
