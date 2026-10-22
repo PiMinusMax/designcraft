@@ -908,6 +908,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Move Anchors", "Sposta ancoraggi"),
     ("Move Column", "Sposta colonna"),
     ("Move Guide", "Sposta guida"),
+    ("Move Column Guide", "Sposta guida colonna"),
     ("Move Layer", "Sposta livello"),
     ("Move Pages…", "Sposta pagine…"),
     ("Move to Layer", "Sposta su livello"),

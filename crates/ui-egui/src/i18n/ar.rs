@@ -1609,6 +1609,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Move Anchors", "تحريك نقاط الارتساء"),
     ("Move Column", "نقل عمود"),
     ("Move Guide", "تحريك دليل"),
+    ("Move Column Guide", "تحريك دليل العمود"),
     ("Move Layer", "نقل طبقة"),
     ("Move Pages…", "نقل صفحات…"),
     ("Move to Layer", "نقل إلى طبقة"),

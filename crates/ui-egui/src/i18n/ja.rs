@@ -1023,6 +1023,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Move Anchors", "アンカーポイントを移動"),
     ("Move Column", "列を移動"),
     ("Move Guide", "ガイドを移動"),
+    ("Move Column Guide", "列ガイドを移動"),
     ("Move Layer", "レイヤーを移動"),
     ("Move Pages…", "ページを移動…"),
     ("Move to Layer", "レイヤーへ移動"),

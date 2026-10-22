@@ -431,6 +431,15 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(
+            "layout.moveColumnGuide",
+            "Move Column Guide",
+            [],
+            None,
+            "{spread?, parent? (a parent's prefix, label or index: its spread instead of `spread`), page (index in the spread), gutter (0 = between the first two columns), position (the gutter's new left edge, spread x)} → {positions (each column's left and right edge from the margin box's left edge), left (where the gutter's left edge went, spread x)} — both guides of the gutter move, keeping its width, and stop at the neighbouring guides and the margins; a document page takes the result as its own columns, a parent page passes it to the pages that follow it; refused while column guides are locked",
+            column_guides_unlocked,
+            move_column_guide
+        ),
+        cmd!(
             "layout.documentSetup",
             "Document Setup…",
             ["File"],
@@ -868,6 +877,52 @@ pub fn specs() -> Vec<CommandSpec> {
             ok()
         }),
     ]
+}
+
+/// Column guides can be dragged: a document is open and View › Grids & Guides › Lock Column
+/// Guides is off.
+fn column_guides_unlocked(s: &Session) -> std::result::Result<(), String> {
+    has_doc(s)?;
+    match s.active() {
+        Some(st) if st.doc.settings.column_guides_locked => Err("column guides are locked (View › Grids & Guides › Lock Column Guides)".into()),
+        _ => Ok(()),
+    }
+}
+
+/// A column guide dragged with the Selection tool: gutter `gutter` of a page moves to `position`.
+fn move_column_guide(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "layout.moveColumnGuide";
+    let index = |key: &str| -> Result<usize> {
+        let v = p.get(key).ok_or_else(|| bad(CMD, format!("missing `{key}`")))?;
+        v.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad(CMD, format!("`{key}` must be a non-negative integer")))
+    };
+    let (page, gutter) = (index("page")?, index("gutter")?);
+    let position =
+        p.get("position").and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| bad(CMD, "`position` must be a finite number"))?;
+    let r = match p.get("parent") {
+        None | Some(Value::Null) => super::spread_param(p, CMD)?,
+        Some(v) => designcraft_doc::SpreadRef::Parent(parent_spread_index(&s.doc()?.doc, v).ok_or_else(|| bad(CMD, "no such parent"))?),
+    };
+    s.edit(|d, _| {
+        if d.settings.column_guides_locked {
+            return Err(bad(CMD, "column guides are locked"));
+        }
+        let pg = d.spread_mut(r).ok_or_else(|| bad(CMD, "no such spread"))?.pages.get_mut(page).ok_or_else(|| bad(CMD, "no such page"))?;
+        let m = pg.margin_rect();
+        let count = pg.columns.count;
+        if gutter.checked_add(1).is_none_or(|g| g >= count as usize) {
+            return Err(bad(CMD, format!("the page has {} gutters", count.saturating_sub(1))));
+        }
+        let positions =
+            pg.columns.with_gutter_moved(m.width(), gutter, position - m.x0).ok_or_else(|| bad(CMD, "the columns cannot take that position"))?;
+        let left = positions.get(gutter * 2 + 1).map_or(position, |v| m.x0 + v);
+        pg.columns.positions = Some(positions.clone());
+        match r {
+            designcraft_doc::SpreadRef::Doc(_) => pg.local_margins = true,
+            designcraft_doc::SpreadRef::Parent(_) => d.sync_parent_margins(),
+        }
+        Ok(json!({"positions": positions, "left": left}))
+    })
 }
 
 /// A parent spread named by prefix, label (`A-Parent`) or index.
@@ -2226,6 +2281,114 @@ mod parent_tests {
         let page = &inspect["spreads"][0]["pages"][0];
         assert_eq!((page["columns"].clone(), page["customColumns"].clone()), (json!(2), json!(true)), "{page}");
         assert_eq!(page["columnRects"][0], json!([36.0, 36.0, 136.0, 756.0]), "{page}");
+    }
+
+    fn columns_of(s: &crate::Session, abs: usize) -> (Option<Vec<f64>>, bool) {
+        let pg = s.doc().unwrap().doc.page(abs).unwrap().clone();
+        (pg.columns.positions, pg.local_margins)
+    }
+
+    /// Three columns across a 540 pt margin box (36 pt margins), column guides unlocked.
+    fn three_columns(pages: u64) -> crate::Session {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({"pages": pages})).unwrap();
+        s.execute("layout.marginsAndColumns", &json!({"parent": "A", "columns": 3, "gutter": 12})).unwrap();
+        s.execute("view.lockColumnGuides", &json!({"on": false})).unwrap();
+        s
+    }
+
+    /// Dragging a column guide moves its gutter's two guides together, stops at the neighbouring
+    /// gutter and the margin, makes a following page's columns its own, and undoes in one step.
+    #[test]
+    fn move_column_guide_moves_the_gutter_pair_within_its_neighbours() {
+        let mut s = three_columns(1);
+        assert_eq!(columns_of(&s, 0), (None, false), "the page follows A");
+        let mv =
+            |s: &mut crate::Session, gutter: u64, x: f64| s.execute("layout.moveColumnGuide", &json!({"page": 0, "gutter": gutter, "position": x}));
+        let r = mv(&mut s, 0, 236.0).unwrap();
+        assert_eq!(r, json!({"positions": [0.0, 200.0, 212.0, 356.0, 368.0, 540.0], "left": 236.0}));
+        assert_eq!(columns_of(&s, 0), (Some(vec![0.0, 200.0, 212.0, 356.0, 368.0, 540.0]), true));
+        let inspect = s.execute("document.inspect", &json!({})).unwrap();
+        assert_eq!(inspect["spreads"][0]["pages"][0]["columnRects"][0], json!([36.0, 36.0, 236.0, 756.0]));
+        // Past the next gutter: it stops there, and the middle column has no width.
+        assert_eq!(mv(&mut s, 0, 1000.0).unwrap()["left"], json!(36.0 + 344.0));
+        // Past the right margin: the last gutter stops 12 pt (its width) inside it.
+        assert_eq!(mv(&mut s, 1, 1e12).unwrap()["positions"], json!([0.0, 344.0, 356.0, 528.0, 540.0, 540.0]));
+        // Past the left margin.
+        assert_eq!(mv(&mut s, 0, -1e12).unwrap()["positions"], json!([0.0, 0.0, 12.0, 528.0, 540.0, 540.0]));
+        for _ in 0..3 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert_eq!(columns_of(&s, 0), (Some(vec![0.0, 200.0, 212.0, 356.0, 368.0, 540.0]), true));
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(columns_of(&s, 0), (None, false), "one undo step per drag");
+    }
+
+    /// On a parent page the drag changes the parent, and the document pages that follow it get
+    /// the new columns; a page with columns of its own keeps them.
+    #[test]
+    fn move_column_guide_on_a_parent_reaches_the_pages_that_follow_it() {
+        let mut s = three_columns(3);
+        // Page 1, the left page of spread 1, gets columns of its own.
+        let x = s.doc().unwrap().doc.spreads[1].pages[0].margin_rect().x0 + 300.0;
+        s.execute("layout.moveColumnGuide", &json!({"spread": 1, "page": 0, "gutter": 1, "position": x})).unwrap();
+        let own = columns_of(&s, 1);
+        assert!(own.1 && own.0.is_some());
+        let d = &s.doc().unwrap().doc;
+        // A's right page: the one page 0 (a right page) and page 2 follow.
+        let x0 = d.parents[0].pages[1].margin_rect().x0;
+        s.execute("layout.moveColumnGuide", &json!({"parent": "A", "page": 1, "gutter": 0, "position": x0 + 100.0})).unwrap();
+        let moved = vec![0.0, 100.0, 112.0, 356.0, 368.0, 540.0];
+        assert_eq!(s.doc().unwrap().doc.parents[0].pages[1].columns.positions, Some(moved.clone()));
+        assert_eq!(columns_of(&s, 0), (Some(moved.clone()), false));
+        assert_eq!(columns_of(&s, 2), (Some(moved), false));
+        assert_eq!(columns_of(&s, 1), own, "page 1's columns are its own");
+        // The same parent page by spread reference.
+        let spread = json!({"kind": "parent", "index": 0});
+        s.execute("layout.moveColumnGuide", &json!({"spread": spread, "page": 1, "gutter": 0, "position": x0 + 50.0})).unwrap();
+        assert_eq!(columns_of(&s, 0).0.unwrap()[1], 50.0);
+    }
+
+    /// A drag's preview in one document is put back there when another document became active.
+    #[test]
+    fn a_column_guide_preview_is_cancelled_in_its_own_document() {
+        let mut s = three_columns(1);
+        let uid = s.doc().unwrap().uid;
+        s.begin_interaction("Move Column Guide").unwrap();
+        s.preview("layout.moveColumnGuide", json!({"page": 0, "gutter": 0, "position": 236})).unwrap();
+        s.execute("file.new", &json!({})).unwrap();
+        s.cancel_interaction_of(uid);
+        s.set_active(0);
+        assert!(s.doc().unwrap().interaction.is_none());
+        assert_eq!(columns_of(&s, 0), (None, false));
+    }
+
+    #[test]
+    fn move_column_guide_refuses_while_locked_and_hostile_params() {
+        let mut s = three_columns(1);
+        s.execute("view.lockColumnGuides", &json!({"on": true})).unwrap();
+        assert!(s.execute("layout.moveColumnGuide", &json!({"page": 0, "gutter": 0, "position": 200})).is_err());
+        assert_eq!(columns_of(&s, 0), (None, false));
+        s.execute("view.lockColumnGuides", &json!({"on": false})).unwrap();
+        for p in [
+            json!({"page": 0, "gutter": 0}),
+            json!({"page": 0, "gutter": 0, "position": f64::NAN}),
+            json!({"page": 0, "gutter": 0, "position": "200"}),
+            json!({"page": 0, "gutter": 2, "position": 200}),
+            json!({"page": 0, "gutter": u64::MAX, "position": 200}),
+            json!({"page": 0, "gutter": -1, "position": 200}),
+            json!({"page": 0, "gutter": 0.5, "position": 200}),
+            json!({"page": 9, "gutter": 0, "position": 200}),
+            json!({"page": u64::MAX, "gutter": 0, "position": 200}),
+            json!({"gutter": 0, "position": 200}),
+            json!({"spread": 99, "page": 0, "gutter": 0, "position": 200}),
+            json!({"parent": "Z", "page": 0, "gutter": 0, "position": 200}),
+            json!({"page": 0, "gutter": 0, "position": f64::MAX}),
+        ] {
+            let r = s.execute("layout.moveColumnGuide", &p);
+            // A huge but finite position is clamped to the margin; everything else is refused.
+            assert!(r.is_err() || p["position"] == json!(f64::MAX), "{p}: {r:?}");
+        }
     }
 }
 

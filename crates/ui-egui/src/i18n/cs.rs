@@ -778,6 +778,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Move Anchors", "Přesunout kotvy"),
     ("Move Column", "Přesunout sloupec"),
     ("Move Guide", "Přesunout vodítko"),
+    ("Move Column Guide", "Přesunout vodítko sloupce"),
     ("Move Layer", "Přesunout vrstvu"),
     ("Move Pages…", "Přesunout stránky…"),
     ("Move to Layer", "Přesunout do vrstvy"),
