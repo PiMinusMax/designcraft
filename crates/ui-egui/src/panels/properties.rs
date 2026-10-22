@@ -3077,8 +3077,11 @@ pub(crate) fn reveal_link(app: &mut DesignApp, p: &Value) -> Result<Value, Strin
         .and_then(|rows| rows.iter().find(|r| (asset.is_some() && r["asset"].as_u64() == asset) || (story.is_some() && r["story"].as_u64() == story)))
         .ok_or("no such link")?;
     let path = row["path"].as_str().filter(|path| !path.is_empty()).ok_or("this graphic is embedded: it has no file")?.to_string();
+    // A relative link names a file next to the document: the file manager needs the full path.
+    let document = app.session.doc().ok().and_then(|d| d.path.clone());
+    let file = designcraft_engine::io::document_path(&path, document.as_deref().map(std::path::Path::new)).map_err(|e| e.to_string())?;
     let reveal = app.services.reveal.as_mut().ok_or("Show in Folder isn't available here")?;
-    reveal(&path)?;
+    reveal(&file.to_string_lossy())?;
     Ok(json!({"path": path}))
 }
 
@@ -3693,6 +3696,26 @@ mod tests {
         assert_eq!(*shown.lock().unwrap(), vec![path.to_string(), path.to_string()]);
         h.state_mut().services.reveal = None;
         assert!(h.state_mut().run("links.reveal", json!({"asset": assets[0].0})).unwrap_err().contains("isn't available"));
+    }
+
+    /// A relative link is resolved against the document's file, as reading it is: the host gets
+    /// the full path, the panel keeps the stored one.
+    #[test]
+    fn show_in_folder_resolves_a_relative_link_against_the_document() {
+        let (mut app, _, assets) = linked_graphics(&[Some("assets/photo.svg")]);
+        app.session.doc_mut().unwrap().path = Some("/project/brochure.designcraft".into());
+        let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = shown.clone();
+        app.services.reveal = Some(Box::new(move |p: &str| {
+            log.lock().unwrap().push(p.to_string());
+            Ok(())
+        }));
+        assert_eq!(app.run("links.reveal", json!({"asset": assets[0].0})).unwrap()["path"], "assets/photo.svg");
+        assert_eq!(*shown.lock().unwrap(), vec!["/project/assets/photo.svg".to_string()]);
+        // Without a document file there is nothing to resolve it against.
+        app.session.doc_mut().unwrap().path = None;
+        assert!(app.run("links.reveal", json!({"asset": assets[0].0})).is_err());
+        assert_eq!(shown.lock().unwrap().len(), 1, "nothing handed to the host");
     }
 
     #[test]
