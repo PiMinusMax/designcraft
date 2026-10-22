@@ -224,7 +224,7 @@ const DIAL: f32 = 26.0;
 
 /// InDesign's angle dial: a circle with a radius pointing where the light comes from (0° to the
 /// right, counter-clockwise). A click or a drag on it points it at the pointer.
-fn angle_dial(ui: &mut egui::Ui, deg: f64, enabled: bool) -> Option<f64> {
+pub(crate) fn angle_dial(ui: &mut egui::Ui, deg: f64, enabled: bool) -> Option<f64> {
     let sense = if enabled { egui::Sense::click_and_drag() } else { egui::Sense::hover() };
     let (r, resp) = ui.allocate_exact_size(egui::vec2(DIAL, DIAL), sense);
     resp.widget_info(|| egui::WidgetInfo::slider(enabled, deg, "Angle"));

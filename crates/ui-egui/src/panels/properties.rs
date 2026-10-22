@@ -2639,7 +2639,11 @@ pub fn effects_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             }
             caption(ui, crate::i18n::tr(&app.ui.language, "Angle"));
             let global = app.session.active().map_or(120.0, |st| st.doc.settings.global_light);
-            if let Some(v) = number(ui, "dsa", Some(if ds.global_light { global } else { ds.angle }), "°", 50.0, 0) {
+            let angle = if ds.global_light { global } else { ds.angle };
+            // The number, or the dial beside it (as in the Effects dialog).
+            let picked =
+                ui.horizontal(|ui| number(ui, "dsa", Some(angle), "°", 50.0, 0).or(crate::effects_dialog::angle_dial(ui, angle, true))).inner;
+            if let Some(v) = picked {
                 // With Use Global Light on, the angle is the document's (every such shadow moves).
                 let _ = if ds.global_light {
                     app.run("object.globalLight", json!({"angle": v}))
@@ -3541,6 +3545,48 @@ mod effects_panel_tests {
         assert!(texts.iter().any(|t| t == "Object:"), "{texts:?}");
         click(&mut app, &ctx, "Knockout Group");
         assert!(!item(&app, a).knockout);
+    }
+
+    #[test]
+    fn the_effects_panel_sets_the_drop_shadow_angle_with_a_dial() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [72, 72, 144, 144]})).unwrap()["id"].as_u64().unwrap();
+        app.run("selection.set", json!({"ids": [id]})).unwrap();
+        app.run("object.dropShadow", json!({"on": true, "angle": 120.0})).unwrap();
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut h = Harness::builder().with_size(vec2(320.0, 600.0)).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                // Fonts first, as the other panel harnesses: they take effect from the next frame.
+                let id = egui::Id::new("test_fonts");
+                if ui.data(|d| d.get_temp::<bool>(id)).is_none() {
+                    crate::theme::install_fonts(ui.ctx(), "en");
+                    ui.data_mut(|d| d.insert_temp(id, true));
+                    return;
+                }
+                effects_panel(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let angle = |h: &Harness<'static, DesignApp>| {
+            h.state().session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().effects.drop_shadow.angle
+        };
+        // A click left of the dial's centre points the light from the left: 180°.
+        let dial = h.get_by(|n| n.role() == egui::accesskit::Role::Slider && n.label().as_deref() == Some("Angle")).rect();
+        let at = dial.center() - vec2(8.0, 0.0);
+        h.hover_at(at);
+        h.drag_at(at);
+        h.drop_at(at);
+        h.run_steps(3);
+        assert_eq!(angle(&h), 180.0);
+        // Straight up from the centre: 90°.
+        let at = dial.center() - vec2(0.0, 8.0);
+        h.hover_at(at);
+        h.drag_at(at);
+        h.drop_at(at);
+        h.run_steps(3);
+        assert_eq!(angle(&h), 90.0);
     }
 
     #[test]
