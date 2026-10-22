@@ -49,6 +49,8 @@ impl NumKind<'_> {
             NumKind::Measure(u) => parse_measure(s, u).ok(),
             NumKind::Number { .. } => {
                 // Numbers accept the same arithmetic as measures (`12+3`, `50%*2`): evaluate as points.
+                // A decimal comma is a decimal point (`48,5°` is 48.5, not 485).
+                let s = designcraft_geom::decimal_comma(s.trim());
                 let cleaned: String =
                     s.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | '*' | '/' | '(' | ')' | ' ')).collect();
                 parse_measure(cleaned.trim(), Unit::Points).ok().or_else(|| cleaned.trim().parse().ok())
@@ -649,6 +651,18 @@ mod tests {
             });
         }
         (got, rect)
+    }
+
+    /// Number fields (angles, percentages) read a decimal comma as a decimal point: `48,5`
+    /// was read as 485.
+    #[test]
+    fn number_fields_read_a_decimal_comma() {
+        let deg = NumKind::Number { suffix: "°", decimals: 1 };
+        assert_eq!(deg.parse("48,5"), Some(48.5));
+        assert_eq!(deg.parse("48,5°"), Some(48.5));
+        assert_eq!(deg.parse("48.5"), Some(48.5));
+        let cm = NumKind::Measure(Unit::Centimeters);
+        assert_eq!(cm.parse("0,1"), Some(Unit::Centimeters.to_pt(0.1)));
     }
 
     #[test]
