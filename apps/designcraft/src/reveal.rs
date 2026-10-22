@@ -45,21 +45,35 @@ fn show(file: &Path, folder: &Path, exists: bool) -> Result<(), String> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn show(file: &Path, folder: &Path, exists: bool) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
+    // The D-Bus call waits up to five seconds for the file manager's answer, so it runs off the
+    // UI thread and can't report back. What can be known up front is reported here: with none
+    // of the programs it would use installed, Show in Folder can't work at all.
+    let dbus = exists && (on_path("gdbus") || on_path("dbus-send"));
+    if !dbus && !on_path("xdg-open") {
+        return Err("Can't open the folder: xdg-open isn't installed".into());
+    }
     let uri = file_uri(file.as_os_str().as_bytes());
     let folder = folder.to_path_buf();
-    // The D-Bus call waits for the file manager's answer: off the UI thread.
     std::thread::Builder::new()
         .name("reveal".into())
         .spawn(move || {
-            if exists && show_items(&uri) {
+            if dbus && show_items(&uri) {
                 return;
             }
-            if let Err(e) = Command::new("xdg-open").arg(&folder).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
-                log::warn!("Show in Folder: xdg-open {}: {e}", folder.display());
+            match Command::new("xdg-open").arg(&folder).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+                Ok(s) if s.success() => {}
+                Ok(s) => log::warn!("Show in Folder: xdg-open {}: {s}", folder.display()),
+                Err(e) => log::warn!("Show in Folder: xdg-open {}: {e}", folder.display()),
             }
         })
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Whether `program` is a file in one of the `PATH` folders, where [`Command`] looks for it.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|dirs| std::env::split_paths(&dirs).any(|d| d.join(program).is_file()))
 }
 
 /// Ask the session's file manager to open the folder with `uri` selected; false if none answered.
@@ -117,6 +131,13 @@ mod tests {
             "file:///home/me/Bilder/Nachshooting%20Vollaufl%C3%B6sung%20%282%29.jpg"
         );
         assert_eq!(file_uri(b"/a/it's,x.pdf"), "file:///a/it%27s%2Cx.pdf");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn programs_are_looked_up_on_the_path() {
+        assert!(on_path("sh"));
+        assert!(!on_path("designcraft-no-such-program"));
     }
 
     #[test]
