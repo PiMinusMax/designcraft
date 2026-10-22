@@ -4109,24 +4109,31 @@ mod effects_panel_tests {
             app,
         );
         h.run_steps(3);
-        let field = |h: &Harness<'static, DesignApp>, pt: f64| {
+        // Replace the text of the field showing `pt` (in mm) with `typed`.
+        fn retype(h: &mut Harness<'static, DesignApp>, pt: f64, typed: &str) {
             let v = designcraft_geom::format_measure(pt, Unit::Millimeters);
-            h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some(v.as_str())).rect().center()
+            let at = h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some(v.as_str())).rect().center();
+            h.hover_at(at);
+            h.drag_at(at);
+            h.drop_at(at);
+            h.run_steps(2);
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.event(egui::Event::Text(typed.into()));
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+        }
+        let shadow = |h: &Harness<'static, DesignApp>| {
+            h.state().session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().effects.drop_shadow.clone()
         };
-        // Distance and Size, not "7 pt" and "5 pt".
-        field(&h, 5.0);
-        let at = field(&h, 7.0);
-        h.hover_at(at);
-        h.drag_at(at);
-        h.drop_at(at);
-        h.run_steps(2);
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.event(egui::Event::Text("3".into()));
-        h.key_press(egui::Key::Enter);
-        h.run_steps(3);
-        let ds = h.state().session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().effects.drop_shadow.clone();
-        assert!((ds.distance - Unit::Millimeters.to_pt(3.0)).abs() < 1e-6, "3 is 3 mm: {}", ds.distance);
-        assert_eq!(ds.size, 5.0);
+        // Distance and Size show in mm, not as "7 pt" and "5 pt"; a bare number typed is mm.
+        retype(&mut h, 7.0, "3");
+        let ds = shadow(&h);
+        assert!((ds.distance - Unit::Millimeters.to_pt(3.0)).abs() < 1e-6, "Distance 3 is 3 mm: {}", ds.distance);
+        assert_eq!(ds.size, 5.0, "Size is left alone");
+        retype(&mut h, 5.0, "2");
+        let ds = shadow(&h);
+        assert!((ds.size - Unit::Millimeters.to_pt(2.0)).abs() < 1e-6, "Size 2 is 2 mm: {}", ds.size);
+        assert!((ds.distance - Unit::Millimeters.to_pt(3.0)).abs() < 1e-6, "Distance is left alone: {}", ds.distance);
     }
 
     #[test]
