@@ -891,6 +891,18 @@ fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: 
     if let Some(tex) = app.canvas.texture.as_mut() {
         tex.set_partial([x0 as usize, y0 as usize], ci, egui::TextureOptions::LINEAR);
     }
+    // The same region in the canvas's own copy of its pixels.
+    if let Some(all) = app.canvas.pixels.as_mut() {
+        let all = std::sync::Arc::make_mut(all);
+        let (aw, pw) = (all.width as usize, img.width as usize);
+        for (row, src) in img.pixels.chunks_exact(pw * 4).enumerate() {
+            let start = ((y0 as usize + row) * aw + x0 as usize) * 4;
+            if let Some(dst) = all.pixels.get_mut(start..start + pw * 4) {
+                dst.copy_from_slice(src);
+            }
+        }
+        app.canvas.pixels_generation += 1;
+    }
     done(app);
     app.canvas.patches += 1;
     app.perf.render_ms = crate::now_ms() - t0;
@@ -919,6 +931,8 @@ fn upload(app: &mut DesignApp, ctx: &egui::Context, mut img: designcraft_render:
         Some(tex) => tex.set(ci, egui::TextureOptions::LINEAR),
         None => app.canvas.texture = Some(ctx.load_texture("canvas", ci, egui::TextureOptions::LINEAR)),
     }
+    app.canvas.pixels = Some(std::sync::Arc::new(img));
+    app.canvas.pixels_generation += 1;
 }
 
 fn dashed(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, dash: f32, gap: f32) {
@@ -1584,6 +1598,24 @@ thread_local! {
     static HIGHLIGHT_RENDERER: std::cell::RefCell<Option<designcraft_render::Renderer>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The `w` × `h` premultiplied pixels of `img` from (`x0`, `y0`), the pasteboard colour `back`
+/// where that reaches past the image.
+fn crop(img: &designcraft_render::Rendered, x0: i64, y0: i64, w: u32, h: u32, back: [u8; 3]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    for y in 0..i64::from(h) {
+        for x in 0..i64::from(w) {
+            let (sx, sy) = (x0 + x, y0 + y);
+            let inside = sx >= 0 && sy >= 0 && sx < i64::from(img.width) && sy < i64::from(img.height);
+            let px = inside.then(|| (sy as usize * img.width as usize + sx as usize) * 4).and_then(|i| img.pixels.get(i..i + 4));
+            match px {
+                Some(p) => out.extend_from_slice(p),
+                None => out.extend_from_slice(&[back[0], back[1], back[2], 255]),
+            }
+        }
+    }
+    out
+}
+
 /// InDesign draws selected text inverted: whatever lies under the highlight (paper, the frame's
 /// fill, a placed image, the selected glyphs themselves) shows in its inverse colour. Black text
 /// on white paper turns white on black, and white text on a dark fill turns dark on a light
@@ -1632,10 +1664,22 @@ fn draw_inverse_highlight(
         app.ui.ink_limit.map(f32::to_bits),
         back.to_array(),
     );
+    // What the canvas shows under the highlight: cut from the canvas's own pixels when its texture
+    // is at this zoom (no second render; Preview mode's clipping included), else rendered here.
+    // The texture's pixel at the highlight's top left, kept in canvas space so scrolling (which
+    // only shifts the texture) reuses the highlight.
+    let from_canvas =
+        app.canvas.shown.zip(app.canvas.pixels.clone()).filter(|(sh, _)| (sh.zoom - xf.zoom).abs() < 1e-9 && xf.rot == 0).map(|(sh, px)| {
+            let c = xf.to_canvas(bbox.min);
+            let k = sh.zoom * ppp as f64;
+            (((c.x - sh.origin.x) * k).round() as i64, ((c.y - sh.origin.y) * k).round() as i64, px)
+        });
+    let at = from_canvas.as_ref().map(|(x, y, _)| (*x, *y));
     let key = egui::Id::new(("inverse_sel", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, story.0))
         .with(&display)
         .with((runs.iter().map(|r| r.1.len()).sum::<usize>(), w, h, preview))
-        .with((bbox.min.x.to_bits(), bbox.min.y.to_bits(), xf.zoom.to_bits(), xf.rot, st.selection.text.map(|t| (t.anchor, t.focus))));
+        .with((at, app.canvas.pixels_generation, xf.zoom.to_bits(), xf.rot, st.selection.text.map(|t| (t.anchor, t.focus))))
+        .with(at.is_none().then(|| (bbox.min.x.to_bits(), bbox.min.y.to_bits())));
     let cache_id = egui::Id::new("inverse_sel_tex");
     let cached: Option<(egui::Id, egui::TextureHandle)> = ctx.data(|d| d.get_temp(cache_id));
     let tex = match cached {
@@ -1661,22 +1705,33 @@ fn draw_inverse_highlight(
             let mut mask = vello_cpu::Pixmap::new(w as u16, h as u16);
             let mut res = vello_cpu::Resources::new();
             rc.render(&mut mask, &mut res);
-            // What the canvas shows there, rendered with the canvas's own options.
-            let placed: Vec<designcraft_render::Placed> =
-                layout.slots.iter().map(|s| designcraft_render::Placed { spread: s.spread, xf: s.xf }).collect();
-            let opts = screen_options(app, layout, preview, ppp as f64);
-            let mut under = HIGHLIGHT_RENDERER.with(|r| {
-                let mut r = r.borrow_mut();
-                r.get_or_insert_with(designcraft_render::Renderer::new).render(doc, &app.session.cache, &placed, w, h, view, &opts)
-            });
-            // The colours the canvas shows: proofed, or with the ink limit marked, as `upload` does.
-            if app.ui.proof_colors {
-                designcraft_render::proof_view(&mut under, &app.ui.proof_setup);
-            }
-            if app.ui.separation.is_none() && app.ui.ink_limit.is_some() {
-                designcraft_render::separation_view(&mut under, None, app.ui.ink_limit);
-            }
-            let pixels = inverse_under(mask.data_as_u8_slice(), &under.pixels, [back.r(), back.g(), back.b()]);
+            let under = match &from_canvas {
+                Some((x0, y0, px)) => crop(px, *x0, *y0, w, h, [back.r(), back.g(), back.b()]),
+                None => {
+                    // Rendered with the canvas's own options and colours, on this thread only (a
+                    // pool per frame of a drag would cost more than the render).
+                    let placed: Vec<designcraft_render::Placed> =
+                        layout.slots.iter().map(|s| designcraft_render::Placed { spread: s.spread, xf: s.xf }).collect();
+                    let opts = screen_options(app, layout, preview, ppp as f64);
+                    let mut under = HIGHLIGHT_RENDERER.with(|r| {
+                        let mut r = r.borrow_mut();
+                        r.get_or_insert_with(|| {
+                            let mut r = designcraft_render::Renderer::new();
+                            r.threads = 0;
+                            r
+                        })
+                        .render(doc, &app.session.cache, &placed, w, h, view, &opts)
+                    });
+                    if app.ui.proof_colors {
+                        designcraft_render::proof_view(&mut under, &app.ui.proof_setup);
+                    }
+                    if app.ui.separation.is_none() && app.ui.ink_limit.is_some() {
+                        designcraft_render::separation_view(&mut under, None, app.ui.ink_limit);
+                    }
+                    under.pixels
+                }
+            };
+            let pixels = inverse_under(mask.data_as_u8_slice(), &under, [back.r(), back.g(), back.b()]);
             let ci = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &pixels);
             let t = crate::widgets::load_texture(ctx, "inverse_selection", ci, egui::TextureOptions::NEAREST);
             ctx.data_mut(|d| d.insert_temp(cache_id, (key, t.clone())));
@@ -3065,6 +3120,8 @@ mod tests {
         let (a, b) = (xf.to_screen(canvas * Point::new(76.0, 78.0)), xf.to_screen(canvas * Point::new(180.0, 98.0)));
         let image = match h.render() {
             Ok(image) => image,
+            // CI has a renderer: there a missing one is a failure, not a silent pass.
+            Err(e) if std::env::var_os("CI").is_some() => panic!("no offscreen renderer in CI: {e}"),
             Err(e) => {
                 eprintln!("skipped: no offscreen renderer ({e})");
                 return;
