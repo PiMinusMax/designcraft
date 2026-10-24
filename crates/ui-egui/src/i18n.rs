@@ -5159,6 +5159,28 @@ mod tests {
         // Docking chrome labels reach `tr` through craft-ui's localizer.
         keys.extend(crate::panel_docking::DOCK_LABELS.iter().map(|(_, english)| *english));
         // UI labels passed to `tr` that no other catalog has yet.
+        // Generate QR Code › Style.
+        keys.extend([
+            "Error Correction:",
+            "Low (7%)",
+            "Medium (15%)",
+            "Quartile (25%)",
+            "High (30%)",
+            "Modules:",
+            "Squares",
+            "Rounded Squares",
+            "Dots",
+            "Connected",
+            "Roundness:",
+            "Module Size:",
+            "Corner Patterns:",
+            "Logo Area:",
+            "Logo:",
+            "Choose…",
+            "No logo",
+            "A logo area needs High error correction to stay readable.",
+            "Round corner patterns read on phones; a few simple readers need square ones.",
+        ]);
         keys.extend([
             "(any)",
             "(unchanged)",

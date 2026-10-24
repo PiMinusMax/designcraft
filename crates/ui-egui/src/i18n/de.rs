@@ -3,6 +3,28 @@
 //! Brazilian Portuguese, Italian and Ukrainian tables has a row here; the German column of the shared
 //! table is carried over and stays the fallback for keys added there after this table.
 pub(super) const TABLE: &[(&str, &str)] = &[
+    ("Error Correction:", "Fehlerkorrektur:"),
+    ("Low (7%)", "Niedrig (7 %)"),
+    ("Medium (15%)", "Mittel (15 %)"),
+    ("Quartile (25%)", "Quartil (25 %)"),
+    ("High (30%)", "Hoch (30 %)"),
+    ("Modules:", "Module:"),
+    ("Squares", "Quadrate"),
+    ("Rounded Squares", "Abgerundete Quadrate"),
+    ("Dots", "Punkte"),
+    ("Connected", "Verbunden"),
+    ("Roundness:", "Rundung:"),
+    ("Module Size:", "Modulgröße:"),
+    ("Corner Patterns:", "Eckmarken:"),
+    ("Logo Area:", "Logo-Bereich:"),
+    ("Logo:", "Logo:"),
+    ("Choose…", "Auswählen …"),
+    ("No logo", "Kein Logo"),
+    ("A logo area needs High error correction to stay readable.", "Ein Logo-Bereich braucht hohe Fehlerkorrektur, damit der Code lesbar bleibt."),
+    (
+        "Round corner patterns read on phones; a few simple readers need square ones.",
+        "Runde Eckmarken lesen Smartphones; einige einfache Lesegeräte brauchen eckige.",
+    ),
     ("File", "Datei"),
     ("Edit", "Bearbeiten"),
     ("Layout", "Layout"),

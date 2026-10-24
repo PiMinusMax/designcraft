@@ -1466,6 +1466,10 @@ pub struct Item {
     /// Alternative text (Object Export Options) for tagged PDF and EPUB.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub alt_text: String,
+    /// A QR code's style (Generate QR Code…), kept so editing the code keeps its look. None for
+    /// the classic code and every other object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr: Option<designcraft_geom::qr::QrStyle>,
     /// Liquid Layout (object-based pages): pins and resize permissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquid: Option<ObjectLiquid>,
@@ -1550,6 +1554,7 @@ impl Item {
             overrides: None,
             label: String::new(),
             alt_text: String::new(),
+            qr: None,
             xml_tag: String::new(),
             button: None,
             pdf_hidden_layers: Vec::new(),
