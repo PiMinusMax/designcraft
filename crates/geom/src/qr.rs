@@ -103,9 +103,22 @@ impl QrStyle {
     }
 }
 
+/// Which part of a QR code an object is, besides the code itself (which carries the style): a
+/// code drawn in more than one colour is a group of these, each an ordinary filled object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QrPart {
+    /// The square behind the code and its quiet zone.
+    Background,
+    /// The three finder patterns, in a colour of their own.
+    Finders,
+}
+
 /// A QR code's shapes: the data modules, the three finder patterns, and where a logo goes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QrShapes {
+    /// The code with its quiet zone: the background's square.
+    pub frame: Rect,
     pub modules: PathData,
     pub finders: PathData,
     /// The clear area in the middle, inset by half a module: where a logo fits.
@@ -204,7 +217,8 @@ pub fn qr_shapes(text: &str, r: Rect, style: &QrStyle) -> Option<QrShapes> {
         finders.push(round_rect(eye, [re; 4]));
     }
     let logo = clear.map(|(lo, hi)| cell(lo, lo).union(cell(hi - 1, hi - 1)).inset(-m / 2.0));
-    Some(QrShapes { modules: PathData::new(modules), finders: PathData::new(finders), logo, size: n })
+    let frame = Rect::from_center_size(r.center(), (side, side));
+    Some(QrShapes { frame, modules: PathData::new(modules), finders: PathData::new(finders), logo, size: n })
 }
 
 /// The classic code's dark modules for `text` in `r`: one path, finder patterns included.

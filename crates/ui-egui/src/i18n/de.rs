@@ -3,6 +3,11 @@
 //! Brazilian Portuguese, Italian and Ukrainian tables has a row here; the German column of the shared
 //! table is carried over and stays the fallback for keys added there after this table.
 pub(super) const TABLE: &[(&str, &str)] = &[
+    ("Code Color:", "Code-Farbe:"),
+    ("Corner Pattern Color:", "Farbe der Eckmarken:"),
+    ("Background:", "Hintergrund:"),
+    ("Same as Code", "Wie Code"),
+    ("Edit QR Code", "QR-Code bearbeiten"),
     ("Error Correction:", "Fehlerkorrektur:"),
     ("Low (7%)", "Niedrig (7 %)"),
     ("Medium (15%)", "Mittel (15 %)"),

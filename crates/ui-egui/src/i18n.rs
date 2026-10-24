@@ -5161,6 +5161,11 @@ mod tests {
         // UI labels passed to `tr` that no other catalog has yet.
         // Generate QR Code › Style.
         keys.extend([
+            "Code Color:",
+            "Corner Pattern Color:",
+            "Background:",
+            "Same as Code",
+            "Edit QR Code",
             "Error Correction:",
             "Low (7%)",
             "Medium (15%)",

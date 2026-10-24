@@ -34,7 +34,7 @@ impl Dialog {
             "goToPage" => json!({"page": "1"}),
             "epubExport" => json!({"split": false, "mode": "style", "style": designcraft_doc::BASIC_PARAGRAPH}),
             "qrCode" => {
-                json!({"type": "url", "content": "https://", "color": "[Black]", "ecc": "medium", "modules": "square", "finder": "square", "roundness": 1.0, "moduleSize": 1.0, "logoSize": 0.0, "logo": ""})
+                json!({"type": "url", "content": "https://", "color": "[Black]", "finderColor": "", "background": "[Paper]", "ecc": "medium", "modules": "square", "finder": "square", "roundness": 1.0, "moduleSize": 1.0, "logoSize": 0.0, "logo": ""})
             }
             "insertTable" => json!({"bodyRows": 4, "columns": 4, "headerRows": 0, "footerRows": 0}),
             "insertXref" => json!({"linkTo": "paragraph", "style": "", "target": "", "format": ""}),
@@ -2244,6 +2244,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "importOptions" => crate::i18n::tr(&app.ui.language, "Import Options"),
         "loadStyles" => crate::i18n::tr(&app.ui.language, "Load Styles"),
         "fittingOptions" => crate::i18n::tr(&app.ui.language, "Frame Fitting Options"),
+        "qrCode" if d.fields.get("editing").and_then(Value::as_bool).unwrap_or(false) => crate::i18n::tr(&app.ui.language, "Edit QR Code"),
         "qrCode" => crate::i18n::tr(&app.ui.language, "Generate QR Code"),
         "preferences" => crate::i18n::tr(&app.ui.language, "Preferences"),
         "print" => crate::i18n::tr(&app.ui.language, "Print"),
@@ -2933,9 +2934,6 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                                 text_field(ui, &mut d, k, 260.0);
                                 ui.end_row();
                             }
-                            crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Color:"));
-                            text_field(ui, &mut d, "color", 160.0);
-                            ui.end_row();
                         });
                         qr_style_ui(app, ui, &mut d);
                     }
@@ -6024,6 +6022,44 @@ fn qr_style_ui(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
             d.fields.insert(key.into(), json!(v / 100.0));
         }
     };
+    // Colours: any swatch, gradient swatches too. Corner patterns may follow the code; the
+    // background may be left out.
+    let doc = app.session.active().map(|st| st.doc.clone());
+    let colour = |ui: &mut egui::Ui, d: &mut Dialog, key: &str, empty: Option<&str>| {
+        let Some(doc) = &doc else { return };
+        let cur = d.s(key);
+        let shown = if cur.is_empty() { empty.unwrap_or_default().to_string() } else { cur.clone() };
+        egui::ComboBox::from_id_salt(("qr_colour", key.to_string())).selected_text(crate::rtl::widget(ui, &shown)).width(170.0).show_ui(ui, |ui| {
+            if let Some(e) = empty
+                && ui.selectable_label(cur.is_empty(), crate::rtl::widget(ui, e)).clicked()
+            {
+                d.fields.insert(key.into(), json!(""));
+            }
+            for w in doc.swatches.iter().filter(|w| !w.hidden && w.name != designcraft_color::swatch::NONE) {
+                let (c, g) = crate::widgets::swatch_colors(doc, &w.name, 1.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    crate::widgets::paint_chip(ui.painter(), r, c, g);
+                    if ui.selectable_label(w.name == cur, &w.name).clicked() {
+                        d.fields.insert(key.into(), json!(w.name));
+                    }
+                });
+            }
+        });
+    };
+    let same = tr("Same as Code");
+    let none = tr("None");
+    egui::Grid::new("qr_colours").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        crate::rtl::label(ui, tr("Code Color:"));
+        colour(ui, d, "color", None);
+        ui.end_row();
+        crate::rtl::label(ui, tr("Corner Pattern Color:"));
+        colour(ui, d, "finderColor", Some(&same));
+        ui.end_row();
+        crate::rtl::label(ui, tr("Background:"));
+        colour(ui, d, "background", Some(&none));
+        ui.end_row();
+    });
     egui::Grid::new("qr_style").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         crate::rtl::label(ui, tr("Error Correction:"));
         translated_combo(
@@ -7501,7 +7537,9 @@ mod tests {
         ));
         let r = confirm(&mut app).unwrap();
         let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
-        let q = app.session.doc().unwrap().doc.item(id).unwrap().qr.unwrap();
+        // A paper background by default: the code's parts in a group.
+        let d = &app.session.doc().unwrap().doc;
+        let q = d.item(id).unwrap().children().iter().find_map(|c| c.qr).unwrap();
         use designcraft_geom::qr::{Ecc, Finder, Modules};
         assert_eq!((q.modules, q.finder, q.ecc), (Modules::Dots, Finder::Circle, Ecc::High));
         assert!((q.logo - 0.2).abs() < 1e-9);
@@ -7510,6 +7548,7 @@ mod tests {
         crate::menus::activate(&mut app, "app.qrCode", &Value::Null);
         let d = app.ui.dialog.as_ref().unwrap();
         assert_eq!((d.s("modules"), d.s("finder"), d.s("ecc")), ("dots".to_string(), "circle".to_string(), "high".to_string()));
+        assert_eq!((d.s("type"), d.s("content"), d.s("background")), ("url".to_string(), "https://example.com".to_string(), "[Paper]".to_string()));
     }
 
     #[test]

@@ -1470,6 +1470,10 @@ pub struct Item {
     /// the classic code and every other object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qr: Option<designcraft_geom::qr::QrStyle>,
+    /// A part of a multi-coloured QR code other than the code itself (its background, its finder
+    /// patterns): found again when the code is edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_part: Option<designcraft_geom::qr::QrPart>,
     /// Liquid Layout (object-based pages): pins and resize permissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquid: Option<ObjectLiquid>,
@@ -1555,6 +1559,7 @@ impl Item {
             label: String::new(),
             alt_text: String::new(),
             qr: None,
+            qr_part: None,
             xml_tag: String::new(),
             button: None,
             pdf_hidden_layers: Vec::new(),

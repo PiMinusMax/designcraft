@@ -1249,18 +1249,12 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             Ok(Value::Null)
         }
         "app.qrCode" => {
-            // Editing a code: the dialog starts from its style.
-            let style = app.session.active().and_then(|st| st.selection.items.first().and_then(|i| st.doc.item(*i)).and_then(|it| it.qr));
-            let fields = style.map_or(json!({}), |q| {
-                json!({
-                    "ecc": serde_json::to_value(q.ecc).unwrap_or(json!("medium")),
-                    "modules": serde_json::to_value(q.modules).unwrap_or(json!("square")),
-                    "finder": serde_json::to_value(q.finder).unwrap_or(json!("square")),
-                    "roundness": q.roundness,
-                    "moduleSize": q.scale,
-                    "logoSize": q.logo,
-                })
-            });
+            // Editing a code: the dialog starts from what it holds, its style and its colours.
+            let fields = app
+                .session
+                .active()
+                .and_then(|st| st.selection.items.first().and_then(|i| designcraft_engine::cmd::qr::edit_fields(&st.doc, *i)))
+                .unwrap_or_else(|| json!({}));
             app.ui.dialog = Some(crate::dialogs::Dialog::new("qrCode", fields));
             Ok(Value::Null)
         }
