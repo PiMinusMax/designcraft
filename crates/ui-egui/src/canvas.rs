@@ -636,6 +636,13 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
             Some(_) => Cursor::ResizeV,
             None => c,
         };
+        // A ruler guide being dragged keeps the cursor across it until it is dropped, over the
+        // canvas too (the tool's cursor took over as soon as the pointer left the ruler).
+        let c = match ui.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).map(|g| g.orientation) {
+            Some(designcraft_doc::Orientation::Horizontal) => Cursor::ResizeV,
+            Some(designcraft_doc::Orientation::Vertical) => Cursor::ResizeH,
+            None => c,
+        };
         let icon = crate::cursors::show(ui.ctx(), &mut app.cursors, c, p);
         ui.ctx().set_cursor_icon(icon);
         draw_cursor_badge(&painter, p, c, &t);
