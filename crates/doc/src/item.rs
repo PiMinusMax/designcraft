@@ -458,25 +458,87 @@ pub struct TextFrameOptions {
     pub path: Option<PathType>,
 }
 
-/// A text frame's custom baseline grid. Saved as `[start, increment]`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(from = "(f64, f64)", into = "(f64, f64)")]
+/// A text frame's custom baseline grid. Saved as `[start, increment]` when it starts from the
+/// top of the page, otherwise as `[start, increment, relativeTo]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameBaselineGrid {
-    /// The first grid line, down from the top of the page.
+    /// The first grid line, down from the line `relative_to` names.
     pub start: f64,
     /// The distance between grid lines; 0 or less turns the grid off.
     pub increment: f64,
+    pub relative_to: FrameGridRelative,
 }
 
-impl From<(f64, f64)> for FrameBaselineGrid {
-    fn from((start, increment): (f64, f64)) -> Self {
-        FrameBaselineGrid { start, increment }
+impl FrameBaselineGrid {
+    /// A grid measured from the top of the page.
+    pub fn new(start: f64, increment: f64) -> Self {
+        FrameBaselineGrid { start, increment, relative_to: FrameGridRelative::TopOfPage }
     }
 }
 
-impl From<FrameBaselineGrid> for (f64, f64) {
-    fn from(g: FrameBaselineGrid) -> Self {
-        (g.start, g.increment)
+/// What a frame's custom baseline grid's start is measured from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameGridRelative {
+    #[default]
+    #[serde(rename = "page")]
+    TopOfPage,
+    #[serde(rename = "margin")]
+    TopMargin,
+    #[serde(rename = "frame")]
+    TopOfFrame,
+    #[serde(rename = "inset")]
+    TopInset,
+}
+
+impl FrameGridRelative {
+    pub const ALL: [FrameGridRelative; 4] =
+        [FrameGridRelative::TopOfPage, FrameGridRelative::TopMargin, FrameGridRelative::TopOfFrame, FrameGridRelative::TopInset];
+
+    /// The name commands and native files use: page, margin, frame or inset.
+    pub fn name(self) -> &'static str {
+        match self {
+            FrameGridRelative::TopOfPage => "page",
+            FrameGridRelative::TopMargin => "margin",
+            FrameGridRelative::TopOfFrame => "frame",
+            FrameGridRelative::TopInset => "inset",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.name() == name)
+    }
+}
+
+impl Serialize for FrameBaselineGrid {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Files saved before Relative To existed hold two elements; a page-relative grid keeps that form.
+        match self.relative_to {
+            FrameGridRelative::TopOfPage => (self.start, self.increment).serialize(s),
+            r => (self.start, self.increment, r).serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FrameBaselineGrid {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Grid;
+        impl<'de> serde::de::Visitor<'de> for Grid {
+            type Value = FrameBaselineGrid;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("[start, increment] or [start, increment, relativeTo]")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let start = a.next_element()?.ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let increment = a.next_element()?.ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                let relative_to = a.next_element()?.unwrap_or_default();
+                if a.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(A::Error::invalid_length(4, &self));
+                }
+                Ok(FrameBaselineGrid { start, increment, relative_to })
+            }
+        }
+        d.deserialize_seq(Grid)
     }
 }
 
@@ -1686,10 +1748,24 @@ mod tests {
 
     #[test]
     fn frame_baseline_grid_saves_as_start_then_increment() {
+        // A file saved before Relative To existed: the grid starts from the top of the page and
+        // saves back unchanged.
         let v = serde_json::json!({"baselineGrid": [6.0, 14.0]});
         let o = serde_json::from_value::<TextFrameOptions>(v).unwrap();
-        assert_eq!(o.baseline_grid, Some(FrameBaselineGrid { start: 6.0, increment: 14.0 }));
+        assert_eq!(o.baseline_grid, Some(FrameBaselineGrid { start: 6.0, increment: 14.0, relative_to: FrameGridRelative::TopOfPage }));
         assert_eq!(serde_json::to_value(&o).unwrap()["baselineGrid"], serde_json::json!([6.0, 14.0]));
+        for r in [FrameGridRelative::TopMargin, FrameGridRelative::TopOfFrame, FrameGridRelative::TopInset] {
+            let o = TextFrameOptions {
+                baseline_grid: Some(FrameBaselineGrid { relative_to: r, ..FrameBaselineGrid::new(6.0, 14.0) }),
+                ..Default::default()
+            };
+            let v = serde_json::to_value(&o).unwrap();
+            assert_eq!(v["baselineGrid"], serde_json::json!([6.0, 14.0, r.name()]));
+            assert_eq!(serde_json::from_value::<TextFrameOptions>(v).unwrap().baseline_grid, o.baseline_grid);
+        }
+        for bad in [serde_json::json!([6.0]), serde_json::json!([6.0, 14.0, "frame", 1]), serde_json::json!([6.0, 14.0, "spine"])] {
+            assert!(serde_json::from_value::<TextFrameOptions>(serde_json::json!({"baselineGrid": bad})).is_err());
+        }
     }
 
     #[test]

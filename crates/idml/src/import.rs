@@ -2977,6 +2977,7 @@ impl<'r> Importer<'r> {
                     options.baseline_grid = Some(designcraft_doc::FrameBaselineGrid {
                         start: g.num("StartingOffsetForBaselineFrameGrid").unwrap_or(0.0),
                         increment: g.num("BaselineFrameGridIncrement").unwrap_or(12.0),
+                        relative_to: g.get("BaselineFrameGridRelativeOption").map(frame_grid_relative).unwrap_or_default(),
                     });
                 }
                 it.content = Content::Text(TextFrame { story, options });
@@ -3516,6 +3517,19 @@ fn fit_columns(mut columns: Columns, margins: &Margins, page_width: f64) -> Colu
         columns.positions = None;
     }
     columns
+}
+
+/// A `BaselineFrameGridRelativeOption` value (`TopOfInsetOfBaselineFrameGridRelativeOption`, or a
+/// short form such as `TopOfInset`); unknown values measure from the top of the page.
+fn frame_grid_relative(v: &str) -> designcraft_doc::FrameGridRelative {
+    use designcraft_doc::FrameGridRelative as R;
+    let v = v.strip_suffix("OfBaselineFrameGridRelativeOption").unwrap_or(v);
+    match v {
+        "TopOfMargin" | "TopMargin" => R::TopMargin,
+        "TopOfFrame" => R::TopOfFrame,
+        "TopOfInset" | "TopInset" => R::TopInset,
+        _ => R::TopOfPage,
+    }
 }
 
 /// Text Frame Options from `TextFramePreference` elements: each attribute from the first that sets it.

@@ -527,6 +527,15 @@ fn seed_text_frame_options(app: &DesignApp, d: &mut Dialog) {
         _ => ((inner - o.gutter * (n - 1.0)) / n).max(0.0),
     };
     let kind = |v: Value| v.as_str().unwrap_or_default().to_string();
+    // A frame without a custom baseline grid shows the document grid's start and increment.
+    let grid = o.baseline_grid.unwrap_or_else(|| {
+        let g = app.session.active().map(|s| s.doc.settings.baseline_grid.clone()).unwrap_or_default();
+        let relative_to = match g.relative_to {
+            designcraft_doc::GridRelative::TopOfPage => designcraft_doc::FrameGridRelative::TopOfPage,
+            designcraft_doc::GridRelative::TopMargin => designcraft_doc::FrameGridRelative::TopMargin,
+        };
+        designcraft_doc::FrameBaselineGrid { start: g.start, increment: g.increment, relative_to }
+    });
     let shown = json!({
         "columns": o.columns, "gutter": fm(o.gutter),
         "columnsKind": kind(serde_json::to_value(o.columns_kind).unwrap_or_default()), "columnWidth": fm(width),
@@ -542,6 +551,8 @@ fn seed_text_frame_options(app: &DesignApp, d: &mut Dialog) {
         "useMinimumHeight": o.auto_size_use_min_height, "minimumHeight": fm(o.auto_size_min_height),
         "useMinimumWidth": o.auto_size_use_min_width, "minimumWidth": fm(o.auto_size_min_width),
         "noLineBreaks": o.auto_size_no_line_breaks,
+        "customGrid": o.baseline_grid.is_some(), "gridStart": fm(grid.start), "gridIncrement": fm(grid.increment),
+        "gridRelativeTo": grid.relative_to.name(),
     });
     if let Value::Object(m) = &shown {
         for (k, v) in m {
@@ -592,6 +603,28 @@ fn text_frame_options_dialog(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog)
                     crate::rtl::label(ui, tr("Min:"));
                     text_field(ui, d, "firstBaselineMin", 70.0);
                     ui.end_row();
+                });
+                ui.add_space(8.0);
+                crate::rtl::label(ui, egui::RichText::new(tr("Baseline Grid")).font(semibold(12.0)));
+                check(ui, d, "customGrid", tr("Use Custom Baseline Grid"));
+                ui.add_enabled_ui(d.b("customGrid"), |ui| {
+                    egui::Grid::new("tfo_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                        crate::rtl::label(ui, tr("Start:"));
+                        text_field(ui, d, "gridStart", 70.0);
+                        ui.end_row();
+                        crate::rtl::label(ui, tr("Relative To:"));
+                        translated_combo(
+                            &lang,
+                            ui,
+                            d,
+                            "gridRelativeTo",
+                            &[("page", "Top of Page"), ("margin", "Top Margin"), ("frame", "Top of Frame"), ("inset", "Top Inset")],
+                        );
+                        ui.end_row();
+                        crate::rtl::label(ui, tr("Increment Every:"));
+                        text_field(ui, d, "gridIncrement", 70.0);
+                        ui.end_row();
+                    });
                 });
             }
             "autosize" => auto_size(&lang, ui, d),
@@ -855,6 +888,30 @@ fn confirm_text_frame_options(app: &mut DesignApp, d: &mut Dialog) -> Result<Val
     for (key, what) in [("minimumHeight", "the minimum height is not a measure"), ("minimumWidth", "the minimum width is not a measure")] {
         if edited(d, key) {
             p.insert(key.into(), json!(d.m(key).filter(|v| *v >= 0.0).ok_or_else(|| bad(what))?));
+        }
+    }
+    // The custom baseline grid: off, or the fields the user changed (all of them when it is
+    // turned on, since it shows the document grid's).
+    let grid_keys = ["customGrid", "gridStart", "gridIncrement", "gridRelativeTo"];
+    if grid_keys.iter().any(|k| edited(d, k)) {
+        if d.b("customGrid") {
+            let all = edited(d, "customGrid");
+            let mut g = Map::new();
+            if all || edited(d, "gridStart") {
+                g.insert("start".into(), json!(d.m("gridStart").ok_or_else(|| bad("the baseline grid start is not a measure"))?));
+            }
+            if all || edited(d, "gridIncrement") {
+                g.insert(
+                    "increment".into(),
+                    json!(d.m("gridIncrement").filter(|v| *v > 0.0).ok_or_else(|| bad("the baseline grid increment is not a measure"))?),
+                );
+            }
+            if all || edited(d, "gridRelativeTo") {
+                g.insert("relativeTo".into(), json!(d.s("gridRelativeTo")));
+            }
+            p.insert("baselineGrid".into(), Value::Object(g));
+        } else {
+            p.insert("baselineGrid".into(), Value::Null);
         }
     }
     if p.is_empty() {
@@ -3981,6 +4038,26 @@ fn paragraph_style_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialo
                         }
                         ui.end_row();
                     }
+                    // The CJK Grid Settings section edits the same `p.gridAlign` field.
+                    use designcraft_doc::GridAlign;
+                    const GRID_ALIGN: [(GridAlign, &str); 3] =
+                        [(GridAlign::None, "None"), (GridAlign::AllLines, "All Lines"), (GridAlign::FirstLineOnly, "First Line Only")];
+                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Align to Grid:"));
+                    let g: GridAlign = serde_json::from_value(cur(d, "p.gridAlign", &pv["gridAlign"])).unwrap_or_default();
+                    let shown = GRID_ALIGN.iter().find(|o| o.0 == g).map_or("", |o| o.1);
+                    egui::ComboBox::from_id_salt("psgridalign")
+                        .selected_text(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, shown)))
+                        .width(240.0)
+                        .show_ui(ui, |ui| {
+                            for (v, label) in GRID_ALIGN {
+                                if ui.selectable_label(v == g, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).clicked()
+                                    && let Ok(v) = serde_json::to_value(v)
+                                {
+                                    d.fields.insert("p.gridAlign".into(), v);
+                                }
+                            }
+                        });
+                    ui.end_row();
                 });
             }
             "tabs" => style_tabs(&app.ui.language, ui, d, &pv, &doc),
@@ -8304,6 +8381,35 @@ mod tests {
     }
 
     #[test]
+    fn text_frame_options_set_a_custom_baseline_grid_relative_to() {
+        use designcraft_doc::{FrameBaselineGrid, FrameGridRelative};
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let r = app.run("frame.create", json!({"rect": [36, 36, 336, 236], "content": "text", "text": "Hello"})).unwrap();
+        let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
+        let grid = |app: &DesignApp| app.session.doc().unwrap().doc.item(id).unwrap().text_frame().unwrap().options.baseline_grid;
+        let open = |app: &mut DesignApp, fields: &[(&str, Value)]| {
+            let mut d = Dialog::new("textFrameOptions", json!({}));
+            seed_text_frame_options(app, &mut d);
+            for (k, v) in fields {
+                d.fields.insert((*k).into(), v.clone());
+            }
+            app.ui.dialog = Some(d);
+            confirm(app)
+        };
+        app.run("selection.set", json!({"ids": [id.0]})).unwrap();
+        // Turned on, the grid takes the shown start and increment (the document grid's: 3p0 and 1p0).
+        open(&mut app, &[("customGrid", json!(true)), ("gridRelativeTo", json!("frame"))]).unwrap();
+        assert_eq!(grid(&app), Some(FrameBaselineGrid { start: 36.0, increment: 12.0, relative_to: FrameGridRelative::TopOfFrame }));
+        // The dialog shows the frame's grid; changing Relative To keeps its start and increment.
+        open(&mut app, &[("gridStart", json!("0p10"))]).unwrap();
+        open(&mut app, &[("gridRelativeTo", json!("inset"))]).unwrap();
+        assert_eq!(grid(&app), Some(FrameBaselineGrid { start: 10.0, increment: 12.0, relative_to: FrameGridRelative::TopInset }));
+        open(&mut app, &[("customGrid", json!(false))]).unwrap();
+        assert_eq!(grid(&app), None);
+    }
+
+    #[test]
     fn text_frame_options_change_only_what_was_edited() {
         let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({})).unwrap();
@@ -9656,6 +9762,31 @@ mod tests {
         confirm(&mut app).expect("OK saves the style edit");
         let st = app.session.active().unwrap();
         assert_eq!(st.doc.styles.para(&name).unwrap().para.align, Some(designcraft_doc::Align::Center));
+    }
+
+    #[test]
+    fn paragraph_style_options_align_to_grid_shows_and_sets_the_style_grid_alignment() {
+        use designcraft_doc::GridAlign;
+        use egui_kittest::kittest::Queryable;
+        let mut app = test_app();
+        app.session.execute("style.paragraph.create", &json!({"name": "Grid Body", "para": {"gridAlign": "firstLineOnly"}})).unwrap();
+        app.ui.dialog = Some(Dialog::new("paragraphStyleOptions", json!({"name": "Grid Body", "section": "indents"})));
+        let mut h = crate::test_window::open(app, egui::vec2(1400.0, 900.0));
+        let grid = |h: &egui_kittest::Harness<'static, crate::test_window::Window>| {
+            h.state().app.session.active().unwrap().doc.styles.para("Grid Body").unwrap().para.grid_align
+        };
+        h.run_steps(4);
+        h.get_by_value("First Line Only");
+        confirm(&mut h.state_mut().app).unwrap();
+        assert_eq!(grid(&h), Some(GridAlign::FirstLineOnly), "OK without edits keeps the style's alignment");
+        h.state_mut().app.ui.dialog = Some(Dialog::new("paragraphStyleOptions", json!({"name": "Grid Body", "section": "indents"})));
+        h.run_steps(4);
+        h.get_by_value("First Line Only").click();
+        h.run_steps(3);
+        h.get_by_label("All Lines").click();
+        h.run_steps(3);
+        confirm(&mut h.state_mut().app).unwrap();
+        assert_eq!(grid(&h), Some(GridAlign::AllLines));
     }
 
     #[test]

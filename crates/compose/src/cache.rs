@@ -3,7 +3,8 @@
 //! An entry is valid while the inputs it was composed from are the *same allocations*: the story
 //! `Arc` (and its revision), the styles `Arc`, the frame items' `Arc`s and the `Arc`s of every
 //! wrapping item on the frames' spreads, and the same for every story whose anchored objects wrap
-//! its text ([`crate::wrap::neighbours`]). Entries hold clones of those `Arc`s, so the pointers
+//! its text ([`crate::wrap::neighbours`]). An anchored frame's entry also records where its host
+//! story's composition places it. Entries hold clones of those `Arc`s, so the pointers
 //! can't be reused by other allocations while the entry lives.
 
 use std::collections::HashMap;
@@ -99,11 +100,12 @@ impl Cache {
 
     /// [`Cache::get`] for any [`ShownOn`].
     pub fn get_on(&self, doc: &Document, sid: StoryId, on: ShownOn) -> Arc<ComposedStory> {
-        self.get_with(doc, sid, on, true)
+        self.get_with(doc, sid, on, true, 0)
     }
 
-    /// [`Cache::get_on`], wrapped by other stories' anchored objects only when `cross` is set.
-    fn get_with(&self, doc: &Document, sid: StoryId, on: ShownOn, cross: bool) -> Arc<ComposedStory> {
+    /// [`Cache::get_on`], wrapped by other stories' anchored objects only when `cross` is set, for
+    /// a story `depth` hosts down from the story asked for.
+    fn get_with(&self, doc: &Document, sid: StoryId, on: ShownOn, cross: bool, depth: usize) -> Arc<ComposedStory> {
         let Some(story) = doc.stories.get(&sid) else { return Arc::new(ComposedStory { story: sid, ..Default::default() }) };
         let (mut sig, mut keep_items) = signature(doc, story);
         let neighbours = if cross { crate::wrap::neighbours(doc, sid) } else { Vec::new() };
@@ -116,6 +118,24 @@ impl Cache {
                 keep_items.extend(k);
                 keep_stories.push(ns.clone());
             }
+        }
+        // Anchored frames compose where their host story places them, so the host is composed
+        // first and the placements are part of the signature.
+        let placed = if depth < crate::placed::MAX_DEPTH {
+            crate::placed::placements(doc, sid, &mut |host| self.get_with(doc, host, ShownOn::Own, true, depth + 1))
+        } else {
+            Vec::new()
+        };
+        for (id, p) in &placed {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (id, p.spread, p.xf.as_coeffs().map(f64::to_bits)).hash(&mut h);
+            // The placed spread's pages give the frame its page, side and page rect.
+            for pg in doc.spread(p.spread).map_or(&[][..], |sp| &sp.pages[..]) {
+                let m = &pg.margins;
+                (pg.side as u8, [pg.x, pg.width, pg.height, m.top, m.bottom, m.inside, m.outside].map(f64::to_bits)).hash(&mut h);
+            }
+            sig.push(h.finish() as usize);
         }
         let key = (sid, on, !neighbours.is_empty());
         // The key holds the page's index, which a renumbering doesn't change: its name (section
@@ -209,11 +229,11 @@ impl Cache {
         // Parent-page items are composed per page: markers show its name, variables need its index.
         let page = page.filter(|_| with_vars);
         let running = running.then(|| self.running_index(doc));
-        let others: Vec<Arc<ComposedStory>> = neighbours.iter().map(|n| self.neighbour(doc, *n)).collect();
+        let others: Vec<Arc<ComposedStory>> = neighbours.iter().map(|n| self.neighbour(doc, *n, depth)).collect();
         let out = Arc::new(crate::wrap::compose_among(
             doc,
             sid,
-            &ComposeOptions { page_name, section_marker, page, running, label: None, xrefs: with_xrefs.then(|| self.xref_index(doc)) },
+            &ComposeOptions { page_name, section_marker, page, running, label: None, xrefs: with_xrefs.then(|| self.xref_index(doc)), placed },
             &others.iter().map(|o| &**o).collect::<Vec<_>>(),
         ));
         let mut g = self.map.lock().unwrap_or_else(PoisonError::into_inner);
@@ -295,13 +315,13 @@ impl Cache {
     /// Story `sid` composed for the wrap of its anchored objects in other stories: without other
     /// stories' anchored objects (no cycles), and outside the cache when it needs the document-wide
     /// indexes (they compose every story).
-    fn neighbour(&self, doc: &Document, sid: StoryId) -> Arc<ComposedStory> {
+    fn neighbour(&self, doc: &Document, sid: StoryId, depth: usize) -> Arc<ComposedStory> {
         let indexed =
             doc.stories.get(&sid).is_some_and(|st| crate::xref::has_xrefs(st) || (crate::vars::has_vars(st) && crate::vars::has_running(doc, st)));
         if indexed {
             Arc::new(crate::wrap::compose_among(doc, sid, &ComposeOptions::default(), &[]))
         } else {
-            self.get_with(doc, sid, ShownOn::Own, false)
+            self.get_with(doc, sid, ShownOn::Own, false, depth)
         }
     }
 

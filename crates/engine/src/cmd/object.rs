@@ -639,7 +639,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Frame Options…",
             ["Object"],
             Some("Cmd+B"),
-            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, columnsKind?: fixedNumber|fixedWidth, columnWidth? (pt, Fixed Width), firstBaseline?: ascent|capHeight|leading|xHeight|emboxHeight|fixed, firstBaselineMin? (pt), autoSize?: off|heightOnly|widthOnly|heightAndWidth|heightAndWidthProportionally, autoSizeReference?: topLeft|topCenter|topRight|leftCenter|center|rightCenter|bottomLeft|bottomCenter|bottomRight (the point that stays put), useMinimumHeight?: bool, minimumHeight? (pt), useMinimumWidth?: bool, minimumWidth? (pt), noLineBreaks?: bool, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
+            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, columnsKind?: fixedNumber|fixedWidth, columnWidth? (pt, Fixed Width), firstBaseline?: ascent|capHeight|leading|xHeight|emboxHeight|fixed, firstBaselineMin? (pt), autoSize?: off|heightOnly|widthOnly|heightAndWidth|heightAndWidthProportionally, autoSizeReference?: topLeft|topCenter|topRight|leftCenter|center|rightCenter|bottomLeft|bottomCenter|bottomRight (the point that stays put), useMinimumHeight?: bool, minimumHeight? (pt), useMinimumWidth?: bool, minimumWidth? (pt), noLineBreaks?: bool, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), baselineGrid?: {start? (pt), increment? (pt), relativeTo?: page|margin|frame|inset} (the frame's custom baseline grid; fields not given keep the frame's, or come from the document grid; null turns it off), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
             has_selection,
             text_frame_options
         ),
@@ -2547,6 +2547,41 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
                 as u8,
         ),
     };
+    // `Some(None)` turns the frame's custom baseline grid off.
+    let custom_grid = match p.get("baselineGrid") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::Object(g)) => {
+            let num = |key: &str, lo: f64, hi: f64| match g.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => match v.as_f64() {
+                    Some(x) if x.is_finite() && (lo..=hi).contains(&x) => Ok(Some(x)),
+                    _ => Err(bad(ID, format!("baselineGrid.{key} must be a number of points from {lo} to {hi}, not {v}"))),
+                },
+            };
+            let start = num("start", -15552.0, 15552.0)?;
+            let increment = num("increment", 0.0, 15552.0)?;
+            let relative_to = match g.get("relativeTo") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .and_then(designcraft_doc::FrameGridRelative::from_name)
+                        .ok_or_else(|| bad(ID, format!("baselineGrid.relativeTo must be page|margin|frame|inset, not {v}")))?,
+                ),
+            };
+            Some(Some((start, increment, relative_to)))
+        }
+        Some(v) => return Err(bad(ID, format!("baselineGrid must be an object or null, not {v}"))),
+    };
+    // A frame without a custom grid starts from the document's.
+    let doc_grid = {
+        let g = &st.doc.settings.baseline_grid;
+        let relative_to = match g.relative_to {
+            designcraft_doc::GridRelative::TopOfPage => designcraft_doc::FrameGridRelative::TopOfPage,
+            designcraft_doc::GridRelative::TopMargin => designcraft_doc::FrameGridRelative::TopMargin,
+        };
+        designcraft_doc::FrameBaselineGrid { start: g.start, increment: g.increment, relative_to }
+    };
     let rule_color = match p.get("columnRuleColor") {
         None | Some(Value::Null) => None,
         Some(Value::String(c)) if st.doc.swatch(c).is_some() => Some(c.clone()),
@@ -2636,6 +2671,17 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if let Some(v) = rule_bottom {
                 o.column_rule_bottom_inset = v;
+            }
+            match custom_grid {
+                Some(Some((start, increment, relative_to))) => {
+                    let mut g = o.baseline_grid.unwrap_or(doc_grid);
+                    g.start = start.unwrap_or(g.start);
+                    g.increment = increment.unwrap_or(g.increment);
+                    g.relative_to = relative_to.unwrap_or(g.relative_to);
+                    o.baseline_grid = Some(g);
+                }
+                Some(None) => o.baseline_grid = None,
+                None => {}
             }
             // Fixed Width columns set the frame's width: n columns, the gutters between them and
             // the left and right insets.
@@ -5691,5 +5737,35 @@ mod clear_effects_tests {
         let it = item(&s);
         assert!(it.effects.any());
         assert_eq!((it.opacity, it.blend), (0.5, designcraft_color::BlendMode::Multiply));
+    }
+}
+
+#[cfg(test)]
+mod frame_baseline_grid_tests {
+    use super::*;
+    use designcraft_doc::{FrameBaselineGrid, FrameGridRelative};
+
+    #[test]
+    fn text_frame_options_set_a_custom_baseline_grid_relative_to() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 300, 300], "content": "text", "text": "Hello"})).unwrap();
+        let id = ItemId(r["id"].as_u64().unwrap());
+        let grid = |s: &Session| s.doc().unwrap().doc.item(id).and_then(|i| i.text_frame()).and_then(|t| t.options.baseline_grid);
+        // Turning it on with only Relative To takes the document grid's start and increment.
+        let doc = s.doc().unwrap().doc.settings.baseline_grid.clone();
+        s.execute("object.textFrameOptions", &json!({"ids": [id.0], "baselineGrid": {"relativeTo": "frame"}})).unwrap();
+        assert_eq!(grid(&s), Some(FrameBaselineGrid { start: doc.start, increment: doc.increment, relative_to: FrameGridRelative::TopOfFrame }));
+        s.execute("object.textFrameOptions", &json!({"ids": [id.0], "baselineGrid": {"start": 10, "increment": 13, "relativeTo": "inset"}})).unwrap();
+        assert_eq!(grid(&s), Some(FrameBaselineGrid { start: 10.0, increment: 13.0, relative_to: FrameGridRelative::TopInset }));
+        // Fields not given keep the frame's.
+        s.execute("object.textFrameOptions", &json!({"ids": [id.0], "baselineGrid": {"relativeTo": "margin"}})).unwrap();
+        assert_eq!(grid(&s), Some(FrameBaselineGrid { start: 10.0, increment: 13.0, relative_to: FrameGridRelative::TopMargin }));
+        for bad in [json!({"relativeTo": "spine"}), json!({"start": f64::MAX}), json!({"increment": -1}), json!(3)] {
+            assert!(s.execute("object.textFrameOptions", &json!({"ids": [id.0], "baselineGrid": bad})).is_err(), "{bad}");
+        }
+        assert_eq!(grid(&s).map(|g| g.relative_to), Some(FrameGridRelative::TopMargin));
+        s.execute("object.textFrameOptions", &json!({"ids": [id.0], "baselineGrid": null})).unwrap();
+        assert_eq!(grid(&s), None);
     }
 }
