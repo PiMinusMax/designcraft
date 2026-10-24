@@ -962,7 +962,8 @@ fn dashed(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, dash: f32, 
 const MAX_BASELINES: usize = 216 * 72;
 
 /// Baseline grid lines inside a page, measured from its top: `start + n * increment` for n >= 0 (the bottom
-/// edge is not a line). Lines above the page are skipped without walking them, however far up the start is.
+/// edge is not a line), `start` from [`BaselineGrid::origin`](designcraft_doc::BaselineGrid::origin). Lines
+/// above the page are skipped without walking them, however far up the start is.
 fn baseline_grid_lines(start: f64, increment: f64, height: f64) -> impl Iterator<Item = f64> {
     let step = increment.max(1.0);
     let first = if start < 0.0 { start.rem_euclid(step) } else { start };
@@ -1022,7 +1023,7 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
             // Baseline grid.
             if app.ui.baseline_grid && xf.zoom >= s.baseline_grid.view_threshold {
                 let g = &s.baseline_grid;
-                for y in baseline_grid_lines(g.start, g.increment, p.height) {
+                for y in baseline_grid_lines(g.origin(p), g.increment, p.height) {
                     painter.line_segment(
                         [pt(Point::new(pr.x0, pr.y0 + y)), pt(Point::new(pr.x1, pr.y0 + y))],
                         Stroke::new(hair(painter), c32(g.color).gamma_multiply(0.8)),
@@ -1251,6 +1252,9 @@ fn draw_selection(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Docum
         if sel.items.len() == 1 && sel.text.is_none() {
             // InDesign draws a 1 pt bounding box around the selection.
             painter.rect_stroke(xf.rect(a.transform_rect_bbox(it.bounds())), 0.0, Stroke::new(1.0, color), StrokeKind::Middle);
+        } else if sel.key == Some(*id) {
+            // The key object for Align: a thicker bounding box, as in InDesign.
+            painter.rect_stroke(xf.rect(a.transform_rect_bbox(it.bounds())), 0.0, Stroke::new(3.0, color), StrokeKind::Middle);
         }
         let b = xf.rect(a.transform_rect_bbox(it.bounds()));
         union = Some(union.map_or(b, |u| u.union(b)));
@@ -1583,6 +1587,21 @@ fn field_focused_id(ctx: &egui::Context) -> egui::Id {
 pub fn begin_frame(ctx: &egui::Context) {
     let (id, focused) = (field_focused_id(ctx), ctx.text_edit_focused());
     ctx.data_mut(|d| d.insert_temp(id, focused));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let now = ctx.input(|i| i.modifiers);
+        // The modifiers last frame ended with are the ones this frame's events began with.
+        ctx.data_mut(|d| {
+            let (_, end) = d.get_temp::<(egui::Modifiers, egui::Modifiers)>(modifiers_id()).unwrap_or((now, now));
+            d.insert_temp(modifiers_id(), (end, now));
+        });
+    }
+}
+
+/// (held when this frame's events began, held after them).
+#[cfg(not(target_arch = "wasm32"))]
+fn modifiers_id() -> egui::Id {
+    egui::Id::new("canvas-frame-modifiers")
 }
 
 /// Caret / text highlight inside a table cell (the cell's lines are offset by the cell origin).
@@ -2546,7 +2565,21 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     // text must not delete the character before it).
     let composing_at_start = app.session.tool_composing();
     let evs = ui.input(|i| i.events.clone());
+    // Native only: egui-winit sends a ⌘+V chord as a paste without its key press, so the modifiers
+    // held at the paste tell Paste in Place from Paste. The web also gets the key press, and the
+    // shortcut table has already run the command. A chord's modifiers may be released in the same
+    // frame, hence the modifiers held at each event.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut held =
+        ui.data(|d| d.get_temp::<(egui::Modifiers, egui::Modifiers)>(modifiers_id())).map_or_else(|| ui.input(|i| i.modifiers), |(start, _)| start);
     for e in evs {
+        #[cfg(not(target_arch = "wasm32"))]
+        let chord = {
+            if let egui::Event::ModifiersChanged(m) = &e {
+                held = *m;
+            }
+            if matches!(e, egui::Event::Paste(_)) { crate::menus::paste_chord_command(app, held) } else { None }
+        };
         let composing = composing_at_start || app.session.tool_composing();
         match e {
             egui::Event::Ime(ime) if wants_text => ime_event(app, ime, vi),
@@ -2567,6 +2600,15 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
                 // `run` puts the copied text on the system clipboard.
                 let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
                 let _ = app.run(id, json!({}));
+            }
+            // Paste in Place's chord (⌘⌥⇧V unless rebound) arrives as a paste too.
+            #[cfg(not(target_arch = "wasm32"))]
+            egui::Event::Paste(_) if chord.is_some() => {
+                if let Some(id) = chord
+                    && crate::menus::enabled(app, id)
+                {
+                    crate::menus::activate(app, id, &serde_json::Value::Null);
+                }
             }
             // Without a native menu bar the copy and paste keys arrive only as these events.
             egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if !app.native_menu => {
@@ -2716,31 +2758,45 @@ fn draw_hidden_characters(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc
             for l in &ft.lines {
                 let size = (l.ascent * 0.75 * xf.zoom).clamp(6.0, 40.0) as f32;
                 let font = egui::FontId::proportional(size);
-                for g in &l.glyphs {
-                    if g.len == 0 {
-                        continue;
-                    }
-                    let ch = story.text[g.byte.min(story.text.len())..].chars().next().unwrap_or(' ');
-                    let mark = match ch {
-                        ' ' => "·",
-                        '\t' => "»",
-                        '\u{2028}' => "¬",
-                        '\u{A0}' => "°",
-                        _ => continue,
-                    };
-                    let p = xf.to_screen(m * Point::new(g.x + if ch == ' ' { g.adv / 2.0 } else { 0.0 }, l.baseline));
-                    let align = if ch == ' ' { egui::Align2::CENTER_BOTTOM } else { egui::Align2::LEFT_BOTTOM };
+                for (x, mark, centered) in hidden_marks(&story.text, l) {
+                    let p = xf.to_screen(m * Point::new(x, l.baseline));
+                    let align = if centered { egui::Align2::CENTER_BOTTOM } else { egui::Align2::LEFT_BOTTOM };
                     painter.text(p, align, mark, font.clone(), col);
-                }
-                if l.last_in_para {
-                    let end = l.range.end;
-                    let mark = if end >= story.text.len() { "#" } else { "¶" };
-                    let p = xf.to_screen(m * Point::new(l.end_x + 1.0, l.baseline));
-                    painter.text(p, egui::Align2::LEFT_BOTTOM, mark, font.clone(), col);
                 }
             }
         }
     }
+}
+
+/// The hidden-character marks on line `l` of a story with text `text`: frame-space x, mark, and
+/// whether the mark is centered on x (spaces) or starts at it.
+fn hidden_marks(text: &str, l: &compose::Line) -> Vec<(f64, &'static str, bool)> {
+    let mut out = Vec::new();
+    for g in &l.glyphs {
+        if g.len == 0 {
+            continue;
+        }
+        let Some(ch) = text.get(g.byte..).and_then(|t| t.chars().next()) else { continue };
+        let mark = match ch {
+            ' ' => "·",
+            '\t' => "»",
+            '\u{2028}' => "¬",
+            '\u{A0}' => "°",
+            _ => continue,
+        };
+        if ch == ' ' {
+            out.push((g.x + g.adv / 2.0, mark, true));
+        } else {
+            out.push((g.x, mark, false));
+        }
+    }
+    if l.last_in_para {
+        // The spaces trimmed off the line's end sit past `end_x`; the paragraph mark follows them.
+        let end = l.glyphs.iter().filter(|g| g.len > 0 && !g.visible && g.x >= l.end_x - 1e-9).map(|g| g.x + g.adv).fold(l.end_x, f64::max);
+        let mark = if l.range.end >= text.len() { "#" } else { "¶" };
+        out.push((end + 1.0, mark, false));
+    }
+    out
 }
 
 /// View › Flattener Preview: red over every object that involves transparency (opacity, blend
@@ -4265,6 +4321,39 @@ mod tests {
     }
 
     #[test]
+    fn the_paste_in_place_shortcut_pastes_in_place_and_plain_paste_offsets() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [100, 100, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        let original = app.session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
+        app.run("edit.copy", json!({})).unwrap();
+        let clip = app.object_clip_text.clone().expect("the copy's placeholder text");
+        let mut h = harness(app);
+        let paste = |h: &mut Harness<'static, DesignApp>, modifiers: egui::Modifiers| {
+            // As egui-winit delivers ⌃⌥⇧V: the chord's paste and the V release, no V press; here the
+            // modifiers are released within the same frame.
+            let release = egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers };
+            let none = egui::Event::ModifiersChanged(egui::Modifiers::NONE);
+            h.input_mut().events.extend([egui::Event::ModifiersChanged(modifiers), egui::Event::Paste(clip.clone()), release, none]);
+            h.run_steps(2);
+            let st = h.state().session.doc().unwrap();
+            let pasted = *st.selection.items.first().expect("the copy is selected");
+            assert_ne!(pasted.0, id);
+            st.doc.item(pasted).unwrap().bounds()
+        };
+        let linux = egui::Modifiers { alt: true, ctrl: true, shift: true, mac_cmd: false, command: true };
+        assert_eq!(paste(&mut h, linux), original, "Paste in Place");
+        let moved = paste(&mut h, egui::Modifiers::COMMAND);
+        assert!((moved.x0 - original.x0 - 12.0).abs() < 1e-9 && (moved.y0 - original.y0 - 12.0).abs() < 1e-9, "{moved:?}");
+        // The modifiers went down in an earlier frame than the paste.
+        h.event_modifiers(egui::Event::Paste(clip.clone()), linux);
+        h.run_steps(2);
+        let st = h.state().session.doc().unwrap();
+        let pasted = *st.selection.items.first().expect("the copy is selected");
+        assert_eq!(st.doc.item(pasted).unwrap().bounds(), original);
+    }
+
+    #[test]
     fn edit_paste_from_the_menu_pastes_svg_on_the_system_clipboard_as_paths() {
         let services = crate::Services { clipboard_text: Some(Box::new(|| Some(ART.to_string()))), ..Default::default() };
         let mut app = DesignApp::new(designcraft_engine::Session::new(), services);
@@ -5232,7 +5321,7 @@ mod tests {
         let (pen, direct, text) = (shown("pen"), shown("directSelection"), shown("type"));
         let ppp = h.ctx.pixels_per_point();
         let images = &mut h.state_mut().cursors;
-        match crate::cursors::MODE {
+        match crate::cursors::mode() {
             crate::cursors::Mode::Os => {
                 assert_eq!(pen.1, images.get(Cursor::Pen, ppp), "Pen");
                 assert_eq!(direct.1, images.get(Cursor::ArrowHollow, ppp), "Direct Selection");
@@ -5558,6 +5647,29 @@ mod tests {
             assert_eq!(text, "Hello", "{key:?} confirms the field and leaves the story alone");
             let size = crate::panels::text_attrs(h.state_mut()).unwrap()["chars"]["size"].clone();
             assert_eq!(size, 18.0, "{key:?} applies the typed size");
+        }
+    }
+
+    #[test]
+    fn trailing_spaces_show_dots_before_the_paragraph_mark() {
+        let text = "ab  \ncd  ";
+        let mut d = Document::new(&designcraft_doc::build::NewDocument::default());
+        let lid = d.default_layer();
+        let rect = DRect::new(0.0, 0.0, 300.0, 100.0);
+        let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), rect, lid, text, Default::default()).unwrap();
+        let cs = compose::compose_story(&d, sid, &compose::ComposeOptions::default());
+        let lines: Vec<_> = cs.frames.iter().flat_map(|f| &f.lines).collect();
+        assert_eq!(lines.len(), 2);
+        for (l, end_mark) in lines.iter().zip(["¶", "#"]) {
+            let marks = hidden_marks(text, l);
+            let dots: Vec<f64> = marks.iter().filter(|m| m.1 == "·").map(|m| m.0).collect();
+            assert_eq!(dots.len(), 2, "a dot for each trailing space: {marks:?}");
+            let &(para_x, mark, _) = marks.last().unwrap();
+            assert_eq!(mark, end_mark);
+            // The dots sit past the last letter, and the mark comes after both spaces.
+            let space = l.glyphs.iter().rev().find(|g| g.len > 0).unwrap();
+            assert!(dots.iter().all(|&x| x > l.end_x && x < para_x), "{dots:?} then {mark} at {para_x}");
+            assert!(para_x >= space.x + space.adv, "{mark} at {para_x} overlaps the last space");
         }
     }
 }

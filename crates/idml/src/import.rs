@@ -295,6 +295,10 @@ struct Importer<'r> {
     parents: Vec<Spread>,
     /// Things read but not kept as they were, for the import report.
     warnings: Vec<String>,
+    /// Cells whose text is rotated (Cell Options › Text › Rotation): the angle is kept and
+    /// written back, but only 0 is composed, so a narrow header column of vertical labels comes
+    /// in horizontal and wraps mid-word (#1468).
+    rotated_cells: usize,
     parent_ids: HashMap<String, SpreadId>,
     spreads: Vec<Spread>,
     page_index: HashMap<String, usize>,
@@ -387,13 +391,10 @@ fn mojikumi_row(e: &El) -> Result<designcraft_doc::cjk::MojikumiAki> {
     Ok(row)
 }
 
+/// The numbers in a whitespace-separated list; empty when any number is NaN or infinite (JSON
+/// can't store them, and dropping just those would shift the rest).
 fn nums(s: &str) -> Vec<f64> {
-    s.split_whitespace().filter_map(|v| v.parse().ok()).collect()
-}
-
-/// Like [`nums`], but empty when any number is NaN or infinite.
-fn finite_nums(s: &str) -> Vec<f64> {
-    let v = nums(s);
+    let v: Vec<f64> = s.split_whitespace().filter_map(|v| v.parse().ok()).collect();
     if v.iter().all(|x| x.is_finite()) { v } else { Vec::new() }
 }
 
@@ -536,6 +537,7 @@ impl<'r> Importer<'r> {
             story_ids: HashMap::new(),
             parents: Vec::new(),
             warnings: Vec::new(),
+            rotated_cells: 0,
             parent_ids: HashMap::new(),
             spreads: Vec::new(),
             page_index: HashMap::new(),
@@ -791,6 +793,12 @@ impl<'r> Importer<'r> {
                 include_prefix: e.get("IncludeSectionPrefix") == Some("true"),
             });
         }
+        if self.rotated_cells > 0 {
+            let n = self.rotated_cells;
+            self.warnings.push(format!(
+                "{n} table cell(s) have rotated text (Cell Options › Text › Rotation): the angle is kept and written back, but the text is composed horizontally"
+            ));
+        }
         self.sections.sort_by_key(|s| s.start);
         self.sections.dedup_by_key(|s| s.start);
         if self.sections.first().is_none_or(|s| s.start != 0) {
@@ -895,6 +903,15 @@ impl<'r> Importer<'r> {
             _ if v.len() >= 4 => Color::cmyk((v[0] / 100.0) as f32, (v[1] / 100.0) as f32, (v[2] / 100.0) as f32, (v[3] / 100.0) as f32),
             _ => return None,
         };
+        // Huge values (1e300) overflow `f32` to infinity.
+        let parts = match c {
+            Color::Rgb { r, g, b } => [r, g, b, 0.0],
+            Color::Cmyk { c, m, y, k } => [c, m, y, k],
+            Color::Gray { k } => [k, 0.0, 0.0, 0.0],
+        };
+        if !parts.iter().all(|v| v.is_finite()) {
+            return None;
+        }
         let ty = if e.get("Model") == Some("Spot") { ColorType::Spot } else { ColorType::Process };
         Some((c, ty))
     }
@@ -947,14 +964,14 @@ impl<'r> Importer<'r> {
             let (Some(id), Some(name)) = (e.get("Self"), e.get("Name")) else { continue };
             let kind = match e.local() {
                 "StripedStrokeStyle" => designcraft_doc::StrokeType::Stripes {
-                    bands: finite_nums(e.get("StripeArray").unwrap_or(""))
+                    bands: nums(e.get("StripeArray").unwrap_or(""))
                         .as_chunks::<2>()
                         .0
                         .iter()
                         .map(|c| (c[0] / 100.0, (c[1] - c[0]) / 100.0))
                         .collect(),
                 },
-                "DashedStrokeStyle" => designcraft_doc::StrokeType::Dashed { pattern: finite_nums(e.get("DashArray").unwrap_or("")) },
+                "DashedStrokeStyle" => designcraft_doc::StrokeType::Dashed { pattern: nums(e.get("DashArray").unwrap_or("")) },
                 _ => designcraft_doc::StrokeType::Dotted,
             };
             let _ = id;
@@ -1624,28 +1641,7 @@ impl<'r> Importer<'r> {
                 a.strikethrough_tint = tint;
             }
         }
-        // OpenType features (only when the element sets any).
-        let mut otf_list: Vec<String> = Vec::new();
-        let mut any = false;
-        for (tag, _, attr) in designcraft_doc::otf::TOGGLES {
-            if let Some(on) = e.boolean(attr) {
-                designcraft_doc::otf::set(&mut otf_list, tag, on);
-                any = true;
-            }
-        }
-        if let Some(fig) = e.prop("OTFFigureStyle")
-            && let Some((id, ..)) = designcraft_doc::otf::FIGURES.iter().find(|f| f.3 == fig.trim())
-        {
-            designcraft_doc::otf::set_figures(&mut otf_list, id);
-            any = true;
-        }
-        if let Some(m) = e.num("OTFStylisticSets") {
-            designcraft_doc::otf::set_stylistic_sets(&mut otf_list, m.max(0.0) as u32);
-            any = true;
-        }
-        if any {
-            a.otf_features = Some(otf_list);
-        }
+        read_otf_features(e, &mut a);
         a.glyph_form = e.prop("GlyphForm");
         a.no_break = e.boolean("NoBreak");
         a.tate_chu_yoko = e.boolean("Tatechuyoko");
@@ -2170,9 +2166,12 @@ impl<'r> Importer<'r> {
         }
         // Table-local options override the named table style. Cell styles are already
         // materialized independently, so their edges retain their higher precedence.
+        let mut border_unset = style.border.is_none() && style.borders.iter().all(|b| b.is_empty());
         let mut borders = std::array::from_fn::<_, 4, _>(|i| t.options.border_for(i).clone());
         for (side, border) in ["TopBorder", "LeftBorder", "BottomBorder", "RightBorder"].iter().zip(&mut borders) {
-            self.cell_stroke_attrs(e, side).apply_to(border);
+            let attrs = self.cell_stroke_attrs(e, side);
+            border_unset &= attrs.is_empty();
+            attrs.apply_to(border);
         }
         t.options.border = borders[0].clone();
         t.options.borders = borders.map(Some);
@@ -2235,6 +2234,9 @@ impl<'r> Importer<'r> {
                 cell.first_baseline_min = min.clamp(0.0, 8640.0);
             }
             cell.rotation = ce.num("RotationAngle").unwrap_or(cell.rotation);
+            if cell.rotation != 0.0 {
+                self.rotated_cells += 1;
+            }
             for (i, side) in ["TopEdge", "LeftEdge", "BottomEdge", "RightEdge"].iter().enumerate() {
                 let attrs = self.cell_stroke_attrs(ce, side);
                 attrs.apply_to(&mut cell.strokes[i]);
@@ -2243,6 +2245,10 @@ impl<'r> Importer<'r> {
                 cell.stroke_priorities[i] = priority;
                 // Preserve style-defined edges and #102's positive-priority local overrides.
                 cell.border_overrides[i] |= priority > 0;
+                // No table or table style border is given anywhere, so the built-in 1 pt default must not
+                // draw over an outer edge the cell explicitly hides (weight 0 or the None swatch), as InDesign draws nothing.
+                let hidden = attrs.weight == Some(0.0) || attrs.color.as_deref() == Some(swatch::NONE);
+                cell.border_overrides[i] |= border_unset && hidden;
             }
             if let Some(slot) = t.cell_mut(r, c) {
                 *slot = cell;
@@ -2422,6 +2428,7 @@ impl<'r> Importer<'r> {
                                         object_point: names::anchor_in(s("AnchorPoint")),
                                         ref_point: row * 3 + col,
                                         keep_within_column: s("PinPosition") == "true",
+                                        spine_relative: s("SpineRelative") == "true",
                                     }
                                 }
                                 _ => designcraft_doc::AnchorPosition::Inline { y_offset: get("AnchorYoffset") },
@@ -2856,7 +2863,7 @@ impl<'r> Importer<'r> {
             {
                 it.fill.gradient_angle = Some(a);
             }
-            let start: Option<Vec<f64>> = e.prop("GradientFillStart").map(|s| finite_nums(&s));
+            let start: Option<Vec<f64>> = e.prop("GradientFillStart").map(|s| nums(&s));
             if let (Some([x, y]), Some(len)) = (start.as_deref().and_then(|v| <[f64; 2]>::try_from(v).ok()), e.num("GradientFillLength"))
                 && len > 0.0
             {
@@ -2874,7 +2881,7 @@ impl<'r> Importer<'r> {
             {
                 it.stroke.gradient_angle = Some(a);
             }
-            let start: Option<Vec<f64>> = e.prop("GradientStrokeStart").map(|s| finite_nums(&s));
+            let start: Option<Vec<f64>> = e.prop("GradientStrokeStart").map(|s| nums(&s));
             if let (Some([x, y]), Some(len)) = (start.as_deref().and_then(|v| <[f64; 2]>::try_from(v).ok()), e.num("GradientStrokeLength"))
                 && len > 0.0
             {
@@ -2967,8 +2974,10 @@ impl<'r> Importer<'r> {
                 if let Some(g) = self.with_style(e, "BaselineFrameGridOption")
                     && g.get("UseCustomBaselineFrameGrid") == Some("true")
                 {
-                    options.baseline_grid =
-                        Some((g.num("StartingOffsetForBaselineFrameGrid").unwrap_or(0.0), g.num("BaselineFrameGridIncrement").unwrap_or(12.0)));
+                    options.baseline_grid = Some(designcraft_doc::FrameBaselineGrid {
+                        start: g.num("StartingOffsetForBaselineFrameGrid").unwrap_or(0.0),
+                        increment: g.num("BaselineFrameGridIncrement").unwrap_or(12.0),
+                    });
                 }
                 it.content = Content::Text(TextFrame { story, options });
                 self.ctx.threads.push((
@@ -3702,6 +3711,11 @@ fn path_capped(pg: &El, max: usize) -> PathData {
         let closed = g.get("PathOpen") != Some("true");
         let mut anchors = Vec::new();
         if let Some(arr) = g.find("PathPointArray") {
+            // A NaN or infinite point drops its subpath (JSON can't store it).
+            let non_finite = |s: Option<&str>| s.is_some_and(|s| s.split_whitespace().any(|v| v.parse::<f64>().is_ok_and(|x| !x.is_finite())));
+            if arr.find_all("PathPointType").take(left).any(|p| ["Anchor", "LeftDirection", "RightDirection"].iter().any(|k| non_finite(p.get(k)))) {
+                continue;
+            }
             for p in arr.find_all("PathPointType").take(left) {
                 let Some(a) = parse_point(p.get("Anchor")) else { continue };
                 let hin = parse_point(p.get("LeftDirection")).unwrap_or(a);
@@ -3853,6 +3867,31 @@ impl Importer<'_> {
         a.shatai_angle = finite("ShataiDegreeAngle").map(|v| v / crate::cjk::SHATAI_ANGLE_UNITS);
         a.shatai_adjust_rotation = e.boolean("ShataiAdjustRotation");
         a.shatai_adjust_tsume = e.boolean("ShataiAdjustTsume");
+    }
+}
+
+/// OpenType features (only when the element sets any).
+fn read_otf_features(e: &El, a: &mut CharAttrs) {
+    let mut otf_list: Vec<String> = Vec::new();
+    let mut any = false;
+    for (tag, _, attr) in designcraft_doc::otf::TOGGLES {
+        if let Some(on) = e.boolean(attr) {
+            designcraft_doc::otf::set(&mut otf_list, tag, on);
+            any = true;
+        }
+    }
+    if let Some(fig) = e.prop("OTFFigureStyle")
+        && let Some((id, ..)) = designcraft_doc::otf::FIGURES.iter().find(|f| f.3 == fig.trim())
+    {
+        designcraft_doc::otf::set_figures(&mut otf_list, id);
+        any = true;
+    }
+    if let Some(m) = e.num("OTFStylisticSets") {
+        designcraft_doc::otf::set_stylistic_sets(&mut otf_list, m.max(0.0) as u32);
+        any = true;
+    }
+    if any {
+        a.otf_features = Some(otf_list);
     }
 }
 

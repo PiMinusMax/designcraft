@@ -1097,3 +1097,26 @@ fn convert_rows_keeps_merged_cells_on_one_side() {
     assert!(!convert_enabled(&s, "Body"));
     check(&s);
 }
+
+#[test]
+fn alternating_fill_counts_saturate_instead_of_wrapping() {
+    let (mut s, _, _) = session_with_frame();
+    s.execute("table.insert", &json!({"rows": 3, "cols": 2})).unwrap();
+    s.execute("table.options", &json!({"altRows": {"first": 4294967297u64, "next": 1, "skipFirst": 4294967296u64, "skipLast": 9999999999u64}}))
+        .unwrap();
+    let t = s.execute("table.get", &json!({})).unwrap();
+    let a = &t["options"]["altRows"];
+    assert_eq!(a["first"], u32::MAX);
+    assert_eq!(a["skipFirst"], u32::MAX);
+    assert_eq!(a["skipLast"], u32::MAX);
+    assert_eq!(a["next"], 1);
+}
+
+#[test]
+fn index_next_paragraphs_saturates_instead_of_wrapping() {
+    let (mut s, _, _) = session_with_frame();
+    s.execute("index.addReference", &json!({"topic": "Intro", "range": "nextParagraphs", "paragraphs": 4294967296u64})).unwrap();
+    let l = s.execute("index.list", &json!({})).unwrap();
+    assert_eq!(l[0]["range"]["type"], "nextParagraphs");
+    assert_eq!(l[0]["range"]["value"], u32::MAX);
+}

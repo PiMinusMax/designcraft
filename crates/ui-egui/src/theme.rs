@@ -446,9 +446,9 @@ pub(crate) fn add_system_fallbacks(fonts: &mut FontDefinitions, system: &[System
 
 /// The UI fonts: the app's own, then the craft-fonts faces from `craft` (empty without
 /// `CRAFT_FONTS_DIR`) as fallbacks at the end of every family: Japanese (BIZ UDPGothic first) and
-/// Simplified Chinese, in the interface language's order, then Arabic. The `arabic` families
+/// Simplified Chinese, in the interface language's order, then Arabic and Georgian. The `arabic` families
 /// put the Arabic face first for right-to-left runs. egui has no system-font discovery, so
-/// without craft-fonts CJK and Arabic UI text has no glyphs.
+/// without craft-fonts CJK, Arabic and Georgian UI text has no glyphs.
 pub(crate) fn font_definitions(craft: &'static [designcraft_fonts::CraftFont], lang: &str) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let add = |fonts: &mut FontDefinitions, name: &str, data: &'static [u8]| {
@@ -466,12 +466,13 @@ pub(crate) fn font_definitions(craft: &'static [designcraft_fonts::CraftFont], l
     japanese.sort_by_key(|f| (f.family != "BIZ UDPGothic", f.style != "Regular"));
     let chinese = pick("Hans");
     let arabic = pick("Arab");
+    let georgian = pick("Geor");
     let name = |f: &designcraft_fonts::CraftFont| format!("craft-{}-{}", f.family, f.style);
     for f in japanese.iter().chain(&chinese) {
         // CJK faces sit on the Latin baseline (see `baseline_tweak`).
         fonts.font_data.insert(name(f), Arc::new(FontData { tweak: baseline_tweak(f.bytes, 0), ..FontData::from_static(f.bytes) }));
     }
-    for f in &arabic {
+    for f in arabic.iter().chain(&georgian) {
         add(&mut fonts, &name(f), f.bytes);
     }
     // Han characters take the forms of the interface language: Chinese faces first for Chinese.
@@ -483,12 +484,16 @@ pub(crate) fn font_definitions(craft: &'static [designcraft_fonts::CraftFont], l
             ja.sort_by_key(|f| (f.family != "BIZ UDPGothic", f.style != "Bold"));
         }
         let (first, second) = if zh { (&chinese, &ja) } else { (&ja, &chinese) };
-        stack.extend(first.iter().chain(second).chain(&arabic).map(|f| name(f)));
+        stack.extend(first.iter().chain(second).chain(&arabic).chain(&georgian).map(|f| name(f)));
     }
     // Arabic runs (rtl.rs): the Arabic face first, so letters and spaces shape as one run.
     for family in ["arabic", "arabic-semibold"] {
         let ui = if family == "arabic" { "ui" } else { "ui-semibold" };
-        let stack = arabic.iter().map(|f| name(f)).chain([ui.to_string(), "ui".to_string()]).chain(japanese.iter().chain(&chinese).map(|f| name(f)));
+        let stack = arabic
+            .iter()
+            .map(|f| name(f))
+            .chain([ui.to_string(), "ui".to_string()])
+            .chain(japanese.iter().chain(&chinese).chain(&georgian).map(|f| name(f)));
         let mut seen = std::collections::HashSet::new();
         fonts.families.insert(FontFamily::Name(family.into()), stack.filter(|n| seen.insert(n.clone())).collect());
     }

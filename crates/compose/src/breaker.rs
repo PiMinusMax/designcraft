@@ -295,7 +295,7 @@ fn cjk_break(a: &Glyph, b: &Glyph, sp: &Spacing) -> bool {
 }
 
 pub fn is_forced(c: char) -> bool {
-    use designcraft_doc::story::*;
+    use designcraft_doc::story::{FORCED_LINE_BREAK, is_break_char};
     c == FORCED_LINE_BREAK || is_break_char(c)
 }
 

@@ -115,6 +115,12 @@ pub(crate) fn parse(xml: &str) -> Result<El, ImportError> {
                     p.kids.push(Node::Text(s));
                 }
             }
+            Event::CData(t) => {
+                let s = t.decode().map(|s| s.to_string()).unwrap_or_default();
+                if let Some(p) = stack.last_mut() {
+                    p.kids.push(Node::Text(s));
+                }
+            }
             Event::GeneralRef(e) => {
                 let name = String::from_utf8_lossy(&e).to_string();
                 let s = match name.as_str() {
@@ -180,8 +186,9 @@ fn run_attrs(rpr: Option<&El>) -> CharAttrs {
     if let Some(s) = r.on("strike") {
         a.strikethrough = Some(s);
     }
-    if let Some(sz) = r.val("sz").and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()) {
-        a.size = Some(sz / 2.0);
+    // Half-points; sizes outside the engine's 0.1–1296 pt range (or non-finite) are dropped.
+    if let Some(pt) = r.val("sz").and_then(|v| v.parse::<f64>().ok()).map(|sz| sz / 2.0).filter(|pt| (0.1..=1296.0).contains(pt)) {
+        a.size = Some(pt);
     }
     if let Some(f) = r.child("rFonts").and_then(|f| f.attr("ascii").or(f.attr("hAnsi"))) {
         a.font_family = Some(f.to_string());
@@ -578,6 +585,12 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn cdata_text() {
+        let el = parse("<a><t><![CDATA[x < y]]></t></a>").unwrap();
+        assert_eq!(el.child("t").unwrap().text(), "x < y");
+    }
+
     /// Issue #712: nesting past the budget is an error from the parser, not a stack overflow later.
     #[test]
     fn nesting_past_the_budget_is_refused() {
@@ -699,6 +712,19 @@ mod tests {
         }
         for at in [0, 1] {
             assert!(fin(st.format_after(at).over.size), "{:?}", st.format_after(at).over.size);
+        }
+    }
+
+    #[test]
+    fn out_of_range_sizes_are_dropped() {
+        let document = format!(
+            r#"<w:document {W}><w:body>
+              <w:p><w:r><w:rPr><w:sz w:val="0"/></w:rPr><w:t>a</w:t></w:r><w:r><w:rPr><w:sz w:val="99999999"/></w:rPr><w:t>b</w:t></w:r></w:p>
+            </w:body></w:document>"#
+        );
+        let st = import(&docx(&document, "", "")).unwrap().story;
+        for at in [0, 1] {
+            assert_eq!(st.format_after(at).over.size, None, "run {at}");
         }
     }
 

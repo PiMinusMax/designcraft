@@ -18,53 +18,63 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     // Unnamed colours (mixed in the Color panel) aren't listed until Add to Swatches; swatches in
     // colour groups are listed under their folder.
     let grouped: Vec<&str> = doc.color_groups.iter().flat_map(|g| g.swatches.iter().map(String::as_str)).collect();
-    for sw in doc.swatches.iter().filter(|w| !w.hidden && !grouped.contains(&w.name.as_str())) {
-        swatch_row(app, ui, &doc, sw, 0.0, fill_cur.as_deref());
-    }
-    for g in &doc.color_groups {
-        let open_id = egui::Id::new(("color_group_open", &g.name));
-        let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(true);
-        let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &g.name));
-        if resp.hovered() {
-            ui.painter().rect_filled(row, 0.0, t.hover);
+    // A gradient dragged from the Gradient panel's thumbnail is dropped on the list, colour
+    // groups included.
+    let (_, dropped) = ui.dnd_drop_zone::<GradientDrag, _>(egui::Frame::NONE, |ui| {
+        for sw in doc.swatches.iter().filter(|w| !w.hidden && !grouped.contains(&w.name.as_str())) {
+            swatch_row(app, ui, &doc, sw, 0.0, fill_cur.as_deref());
         }
-        icons::paint(
-            ui.painter(),
-            egui::Rect::from_min_size(row.min + vec2(2.0, 3.0), vec2(16.0, 16.0)),
-            if open { "chevron-down" } else { "chevron-right" },
-            t.text_dim,
-        );
-        // A folder.
-        let f = egui::Rect::from_min_size(row.min + vec2(20.0, 5.0), vec2(16.0, 12.0));
-        ui.painter().rect_stroke(f, 1.5, egui::Stroke::new(1.2, t.text_dim), egui::StrokeKind::Inside);
-        ui.painter().line_segment([f.left_top() + vec2(1.0, 3.0), f.right_top() + vec2(-1.0, 3.0)], egui::Stroke::new(1.0, t.text_dim));
-        ui.painter().text(row.min + vec2(42.0, 11.0), egui::Align2::LEFT_CENTER, &g.name, egui::FontId::proportional(12.5), t.text);
-        // A double click's first click folded the group: it stays as it was.
-        if resp.clicked() {
-            open = !open;
-            ui.data_mut(|d| d.insert_temp(open_id, open));
-        }
-        if resp.double_clicked() {
-            let _ = app.run("app.colorGroupOptionsDialog", json!({"name": g.name}));
-        }
-        resp.context_menu(|ui| {
-            if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Color Group Options…"))).clicked() {
+        for g in &doc.color_groups {
+            let open_id = egui::Id::new(("color_group_open", &g.name));
+            let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(true);
+            let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &g.name));
+            if resp.hovered() {
+                ui.painter().rect_filled(row, 0.0, t.hover);
+            }
+            icons::paint(
+                ui.painter(),
+                egui::Rect::from_min_size(row.min + vec2(2.0, 3.0), vec2(16.0, 16.0)),
+                if open { "chevron-down" } else { "chevron-right" },
+                t.text_dim,
+            );
+            // A folder.
+            let f = egui::Rect::from_min_size(row.min + vec2(20.0, 5.0), vec2(16.0, 12.0));
+            ui.painter().rect_stroke(f, 1.5, egui::Stroke::new(1.2, t.text_dim), egui::StrokeKind::Inside);
+            ui.painter().line_segment([f.left_top() + vec2(1.0, 3.0), f.right_top() + vec2(-1.0, 3.0)], egui::Stroke::new(1.0, t.text_dim));
+            ui.painter().text(row.min + vec2(42.0, 11.0), egui::Align2::LEFT_CENTER, &g.name, egui::FontId::proportional(12.5), t.text);
+            // A double click's first click folded the group: it stays as it was.
+            if resp.clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(open_id, open));
+            }
+            if resp.double_clicked() {
                 let _ = app.run("app.colorGroupOptionsDialog", json!({"name": g.name}));
-                ui.close();
             }
-            if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Ungroup Color Group"))).clicked() {
-                let _ = app.run("swatch.ungroupColorGroup", json!({"name": g.name}));
-                ui.close();
-            }
-        });
-        if open {
-            for n in &g.swatches {
-                if let Some(sw) = doc.swatches.iter().find(|w| w.name == *n) {
-                    swatch_row(app, ui, &doc, sw, 16.0, fill_cur.as_deref());
+            resp.context_menu(|ui| {
+                if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Color Group Options…"))).clicked() {
+                    let _ = app.run("app.colorGroupOptionsDialog", json!({"name": g.name}));
+                    ui.close();
+                }
+                if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Ungroup Color Group"))).clicked() {
+                    let _ = app.run("swatch.ungroupColorGroup", json!({"name": g.name}));
+                    ui.close();
+                }
+            });
+            if open {
+                for n in &g.swatches {
+                    if let Some(sw) = doc.swatches.iter().find(|w| w.name == *n) {
+                        swatch_row(app, ui, &doc, sw, 16.0, fill_cur.as_deref());
+                    }
                 }
             }
         }
+    });
+    // An unnamed gradient becomes "New Gradient Swatch"; one that is a swatch already stays one.
+    if let Some(g) = dropped
+        && doc.swatch(&g.0).is_some_and(|w| w.hidden)
+    {
+        let _ = app.run("swatch.new", json!({"swatch": g.0}));
     }
     ui.add_space(6.0);
     // InDesign's bottom row: New Color Group, New Swatch, Delete Swatch (the one last clicked).
@@ -575,6 +585,11 @@ fn spectrum(app: &mut DesignApp, ui: &mut egui::Ui, target: &str) {
 #[derive(Clone, Debug)]
 pub struct SwatchDrag(pub String);
 
+/// The selection's gradient dragged from the Gradient panel's thumbnail (its swatch name): the
+/// Swatches panel takes it as a new gradient swatch.
+#[derive(Clone, Debug)]
+pub struct GradientDrag(pub String);
+
 /// A colour in `object.gradient` form, keeping its model (CMYK stays CMYK).
 fn color_json(c: &designcraft_color::Color) -> serde_json::Value {
     use designcraft_color::Color;
@@ -680,8 +695,18 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     let full = ui.available_width().max(60.0);
     ui.add_enabled_ui(has_item, |ui| {
         ui.horizontal(|ui| {
-            let (r, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click_and_drag());
             thumbnail(ui.painter(), r.shrink(1.0), &g, t.field_border);
+            // Drag the gradient onto the Swatches panel to keep it as a swatch.
+            if is_gradient {
+                resp.dnd_set_drag_payload(GradientDrag(fill.swatch.clone()));
+                if resp.dragged()
+                    && let Some(p) = ui.ctx().pointer_interact_pos()
+                {
+                    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("gradient_drag")));
+                    thumbnail(&painter, egui::Rect::from_min_size(p + vec2(8.0, 8.0), vec2(18.0, 18.0)), &g, t.field_border);
+                }
+            }
             // Clicking the thumbnail applies the gradient shown (InDesign's way to start one).
             if resp.clicked() && !is_gradient {
                 send = Some(json!({}));
@@ -1024,6 +1049,64 @@ mod gradient_panel_tests {
         assert_eq!(g.stops.len(), 3, "White, cyan, Black");
         assert_eq!(g.stops[1].color, Color::cmyk(1.0, 0.0, 0.0, 0.0));
         assert!((g.stops[1].offset - 0.5).abs() < 0.05, "{}", g.stops[1].offset);
+    }
+
+    /// The Gradient panel's thumbnail drags the selection's gradient onto the Swatches panel,
+    /// which keeps it as a gradient swatch.
+    #[test]
+    fn a_gradient_dragged_onto_the_swatches_becomes_a_swatch() {
+        let mut app = app_with_frame();
+        app.run("object.gradient", json!({})).unwrap();
+        app.run("window.panel.float", json!({"panel": "gradient", "x": 300, "y": 120})).unwrap();
+        app.run("window.panel.float", json!({"panel": "swatches", "x": 620, "y": 120})).unwrap();
+        let named =
+            |app: &DesignApp| app.session.doc().unwrap().doc.swatches.iter().filter(|w| !w.hidden).map(|w| w.name.clone()).collect::<Vec<_>>();
+        let before = named(&app);
+        let mut h = crate::test_window::open(app, vec2(1400.0, 900.0));
+        h.run_steps(6);
+        drag_gradient_to(&mut h, "[Black]");
+        let after = named(&h.state().app);
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after.last().map(String::as_str), Some("New Gradient Swatch"));
+        let d = &h.state().app.session.doc().unwrap().doc;
+        assert!(matches!(d.swatch("New Gradient Swatch").map(|w| &w.value), Some(SwatchValue::Gradient { .. })));
+        let id = h.state().app.session.doc().unwrap().selection.items[0];
+        assert_eq!(d.item(id).unwrap().fill.swatch, "New Gradient Swatch", "the object keeps it, now by name");
+    }
+
+    /// Drag the Gradient panel's thumbnail onto the Swatches panel row labelled `label`.
+    fn drag_gradient_to(h: &mut egui_kittest::Harness<'static, crate::test_window::Window>, label: &str) {
+        use egui::{Event, Modifiers, PointerButton};
+        // The thumbnail sits left of the Type row.
+        let ty = h.get_by_label("Type:").rect();
+        let from = egui::pos2(ty.min.x - 21.0, ty.min.y + 12.0);
+        let to = h.get_by_label(label).rect().center();
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for i in 1..=10 {
+            h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 10.0)));
+            h.step();
+        }
+        h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(4);
+    }
+
+    /// A colour group's row is part of the list too: a gradient dropped on it becomes a swatch.
+    #[test]
+    fn a_gradient_dropped_on_a_colour_group_becomes_a_swatch() {
+        let mut app = app_with_frame();
+        app.run("object.gradient", json!({})).unwrap();
+        let group = app.run("swatch.newColorGroup", json!({})).unwrap()["name"].as_str().unwrap().to_string();
+        app.run("window.panel.float", json!({"panel": "gradient", "x": 300, "y": 120})).unwrap();
+        // Tall enough to show the group's row below the swatches.
+        app.run("window.panel.float", json!({"panel": "swatches", "x": 620, "y": 120, "height": 700})).unwrap();
+        let mut h = crate::test_window::open(app, vec2(1400.0, 900.0));
+        h.run_steps(6);
+        drag_gradient_to(&mut h, &group);
+        let d = &h.state().app.session.doc().unwrap().doc;
+        assert!(matches!(d.swatch("New Gradient Swatch").map(|w| &w.value), Some(SwatchValue::Gradient { .. })), "dropped on the group's row");
     }
 }
 

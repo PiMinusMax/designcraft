@@ -452,10 +452,32 @@ pub struct TextFrameOptions {
     pub column_rule_bottom_inset: f64,
     /// Use a custom baseline grid for this frame.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline_grid: Option<(f64, f64)>,
+    pub baseline_grid: Option<FrameBaselineGrid>,
     /// Type on a Path: the text runs along the item's path instead of filling it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathType>,
+}
+
+/// A text frame's custom baseline grid. Saved as `[start, increment]`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "(f64, f64)", into = "(f64, f64)")]
+pub struct FrameBaselineGrid {
+    /// The first grid line, down from the top of the page.
+    pub start: f64,
+    /// The distance between grid lines; 0 or less turns the grid off.
+    pub increment: f64,
+}
+
+impl From<(f64, f64)> for FrameBaselineGrid {
+    fn from((start, increment): (f64, f64)) -> Self {
+        FrameBaselineGrid { start, increment }
+    }
+}
+
+impl From<FrameBaselineGrid> for (f64, f64) {
+    fn from(g: FrameBaselineGrid) -> Self {
+        (g.start, g.increment)
+    }
 }
 
 /// Type on a Path Options.
@@ -1660,6 +1682,14 @@ mod tests {
         v["clip"] = serde_json::json!({"kind": "alphaChannel", "path": {"subpaths": []}});
         let c = serde_json::from_value::<Graphic>(v).unwrap().clip.unwrap();
         assert_eq!(*c, ClippingPath::new(ClippingKind::AlphaChannel, PathData::default()));
+    }
+
+    #[test]
+    fn frame_baseline_grid_saves_as_start_then_increment() {
+        let v = serde_json::json!({"baselineGrid": [6.0, 14.0]});
+        let o = serde_json::from_value::<TextFrameOptions>(v).unwrap();
+        assert_eq!(o.baseline_grid, Some(FrameBaselineGrid { start: 6.0, increment: 14.0 }));
+        assert_eq!(serde_json::to_value(&o).unwrap()["baselineGrid"], serde_json::json!([6.0, 14.0]));
     }
 
     #[test]

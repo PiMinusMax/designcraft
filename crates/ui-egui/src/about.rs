@@ -77,16 +77,24 @@ pub fn paint_chat_icon(p: &egui::Painter, c: egui::Pos2, s: f32, color: Color32)
     p.circle_filled(body.center() + vec2(s * 0.18, 0.0), eye, bg);
 }
 
-/// The big "Join our Discord" button. Returns true when clicked.
+/// The Discord button's size for `label`: `min`, widened when the label would not fit inside it.
+pub fn discord_button_size(ctx: &egui::Context, label: &str, min: egui::Vec2) -> egui::Vec2 {
+    let galley = crate::rtl::plain(ctx, label, semibold((min.y * 0.42).max(11.0)), Color32::WHITE);
+    egui::vec2(min.x.max(min.y * 0.5 + 8.0 + galley.size().x + min.y), min.y)
+}
+
+/// The big "Join our Discord" button. Returns true when clicked. `size` is the minimum: a longer label
+/// widens the button (see `discord_button_size`) rather than spilling out of it.
 pub fn discord_button(ui: &mut egui::Ui, label: &str, size: egui::Vec2) -> bool {
-    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
-    let resp = resp.on_hover_text(links::DISCORD).on_hover_cursor(egui::CursorIcon::PointingHand);
-    let fill = if resp.hovered() { Color32::from_rgb(0x47, 0x52, 0xc4) } else { DISCORD };
-    ui.painter().rect_filled(r, size.y / 2.0, fill);
+    let size = discord_button_size(ui.ctx(), label, size);
     let icon = size.y * 0.5;
     let font = semibold((size.y * 0.42).max(11.0));
     let galley = crate::rtl::plain(ui.ctx(), label, font, Color32::WHITE);
     let total = icon + 8.0 + galley.size().x;
+    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+    let resp = resp.on_hover_text(links::DISCORD).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if resp.hovered() { Color32::from_rgb(0x47, 0x52, 0xc4) } else { DISCORD };
+    ui.painter().rect_filled(r, size.y / 2.0, fill);
     let x0 = r.center().x - total / 2.0;
     paint_chat_icon(ui.painter(), pos2(x0 + icon / 2.0, r.center().y), icon, Color32::WHITE);
     ui.painter().galley(pos2(x0 + icon + 8.0, r.center().y - galley.size().y / 2.0), galley, Color32::WHITE);

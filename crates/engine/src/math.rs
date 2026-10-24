@@ -333,7 +333,7 @@ impl Parser<'_> {
             '+' => Node::Sym("+".into(), Class::Bin),
             '-' => Node::Sym("−".into(), Class::Bin),
             '*' => Node::Sym("∗".into(), Class::Bin),
-            '=' | '<' | '>' => Node::Sym(c.to_string(), Class::Rel),
+            '<'..='>' => Node::Sym(c.to_string(), Class::Rel),
             ',' | ';' => Node::Sym(c.to_string(), Class::Punct),
             '\'' => Node::Sym("′".into(), Class::Plain),
             c => Node::Sym(c.to_string(), Class::Plain),
@@ -390,7 +390,7 @@ impl Parser<'_> {
             if self.peek().is_none() {
                 break;
             }
-            if self.s[self.i..].starts_with(&['\\', 'r', 'i', 'g', 'h', 't']) && !self.s.get(self.i + 6).is_some_and(|c| c.is_ascii_alphabetic()) {
+            if self.s[self.i..].starts_with(&['\\', 'r', 'i', 'g', 'h', 't']) && !self.s.get(self.i + 6).is_some_and(char::is_ascii_alphabetic) {
                 self.i += 6;
                 break;
             }

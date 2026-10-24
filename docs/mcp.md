@@ -182,7 +182,9 @@ and `text.move` return, a story's `length` in `get_story` and `inspect_document`
 `get_story`. A character outside ASCII takes 2 to 4 bytes (é 2, — and は 3), so the story `はただ商店` has length 15
 and its second character starts at 3. An offset inside a character snaps back to the start of that character, except
 in `story.replaceRange`: there an offset inside a character, an `end` past the end of the story or a `start` after `end`
-is an error that gives the story length in bytes, and the story is left unchanged.
+is an error that gives the story length in bytes, and the story is left unchanged. A `find.find` or `find.next` match
+that has a `cell` (`{table, row, col}`) is in that table cell's text, and its `start` / `end` count from the start of
+the cell.
 
 ## Text and image fitting
 

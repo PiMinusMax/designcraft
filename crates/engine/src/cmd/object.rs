@@ -715,7 +715,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Align",
             ["Window", "Object & Layout", "Align"],
             None,
-            "{edge: left|hcenter|right|top|vcenter|bottom, to?: selection|keyObject|margins|page|spread, ids?}",
+            "{edge: left|hcenter|right|top|vcenter|bottom, to?: selection|keyObject|margins|page|spread (default: keyObject while a key object is set), ids?}",
             has_selection,
             align
         ),
@@ -737,7 +737,7 @@ pub fn specs() -> Vec<CommandSpec> {
             super::always,
             |s, p| {
                 if let Some(n) = p.get("sides").and_then(Value::as_u64) {
-                    s.prefs.polygon_sides = (n as u32).clamp(3, 100);
+                    s.prefs.polygon_sides = n.clamp(3, 100) as u32;
                 }
                 if let Some(v) = p.get("starInset").and_then(Value::as_f64) {
                     s.prefs.star_inset = (v / 100.0).clamp(0.0, 1.0);
@@ -1001,7 +1001,7 @@ fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
     let text = super::text_param(p, "text");
     let caret = bool_or(p, "caret", content == "text");
     let vertical = bool_or(p, "vertical", false);
-    let sides = p.get("sides").and_then(Value::as_u64).map_or(s.prefs.polygon_sides, |v| v as u32).clamp(3, 100);
+    let sides = p.get("sides").and_then(Value::as_u64).unwrap_or(u64::from(s.prefs.polygon_sides)).clamp(3, 100) as u32;
     let inset = p.get("starInset").and_then(Value::as_f64).map_or(s.prefs.star_inset, |v| v / 100.0).clamp(0.0, 1.0);
     let rect = Rect::new(rect.x0, rect.y0, rect.x1.max(rect.x0 + 0.5), rect.y1.max(rect.y0 + 0.5));
     s.edit(|d, sel| {
@@ -1103,7 +1103,8 @@ fn adopt_or_dangle(dst: &mut Document, src: &Document, id: AssetId) -> AssetId {
     dst.adopt_asset(src, id).unwrap_or_else(|| AssetId(dst.alloc()))
 }
 
-fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut HashMap<StoryId, StoryId>) {
+/// Give `it` (an item of `src`) fresh ids from `dst`, with copies of its stories and the assets it uses.
+pub(crate) fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut HashMap<StoryId, StoryId>) {
     it.id = ItemId(dst.alloc());
     let my_id = it.id;
     if let Some(m) = it.media.as_mut()
@@ -2545,7 +2546,7 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
             let Some(tf) = d.item_mut(*id).and_then(Item::text_frame_mut) else { continue };
             let o = &mut tf.options;
             if let Some(v) = p.get("columns").and_then(Value::as_u64) {
-                o.columns = (v as u32).clamp(1, 40);
+                o.columns = v.clamp(1, 40) as u32;
             }
             if let Some(v) = p.get("gutter").and_then(Value::as_f64) {
                 o.gutter = v.max(0.0);
@@ -3102,8 +3103,18 @@ fn align_reference(d: &Document, ids: &[ItemId], to: &str, key: Option<ItemId>) 
 fn align(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = targets(s, p)?;
     let edge = str_param(p, "edge").unwrap_or("left").to_string();
-    let to = str_param(p, "to").map(str::to_string).unwrap_or_else(|| if ids.len() > 1 { "selection".into() } else { "page".into() });
-    let key = s.doc()?.selection.key;
+    // A key object counts only while it is one of several items aligned. With one, InDesign's
+    // Align To switches to Key Object, so it is also the default target.
+    let key = s.doc()?.selection.key.filter(|k| ids.len() > 1 && ids.contains(k));
+    let to = str_param(p, "to").map(str::to_string).unwrap_or_else(|| {
+        if key.is_some() {
+            "keyObject".into()
+        } else if ids.len() > 1 {
+            "selection".into()
+        } else {
+            "page".into()
+        }
+    });
     s.edit(|d, _| {
         let r = align_reference(d, &ids, &to, key).ok_or_else(|| bad("object.align", "nothing to align"))?;
         for id in &ids {
@@ -3816,6 +3827,21 @@ mod polygon_tests {
             .unwrap();
         assert_eq!(s.doc().unwrap().doc.item(ItemId(id)).unwrap().path.subpaths[0].anchors.len(), 3);
     }
+
+    #[test]
+    fn polygon_sides_clamp_before_narrowing() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("tool.polygonSettings", &json!({"sides": 4294967301u64})).unwrap();
+        assert_eq!(r["sides"], 100);
+        let r = s.execute("tool.polygonSettings", &json!({"sides": 4294967297u64})).unwrap();
+        assert_eq!(r["sides"], 100);
+        let id =
+            s.execute("frame.create", &json!({"rect": [0, 0, 50, 50], "shape": "polygon", "sides": 4294967301u64, "starInset": 0})).unwrap()["id"]
+                .as_u64()
+                .unwrap();
+        assert_eq!(s.doc().unwrap().doc.item(ItemId(id)).unwrap().path.subpaths[0].anchors.len(), 100);
+    }
 }
 
 #[cfg(test)]
@@ -4525,6 +4551,21 @@ mod column_rule_tests {
         // One undo step.
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(opts(&s), before);
+    }
+
+    /// A column count past `u32::MAX` was cast to `u32` before the clamp, so
+    /// 2^32 + 1 wrapped to 1 column instead of clamping to the maximum, 40.
+    #[test]
+    fn huge_column_count_clamps_to_the_maximum() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 300, 300], "content": "text"})).unwrap();
+        let id = ItemId(r["id"].as_u64().unwrap());
+        let columns = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().text_frame().unwrap().options.columns;
+        for (given, want) in [(4_294_967_297_u64, 40), (u64::MAX, 40), (0, 1)] {
+            s.execute("object.textFrameOptions", &json!({"ids": [id.0], "columns": given})).unwrap();
+            assert_eq!(columns(&s), want, "columns {given}");
+        }
     }
 }
 

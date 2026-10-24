@@ -187,6 +187,7 @@ fn open_filters(purpose: &str) -> &'static [OpenFilter] {
     match purpose {
         "swatches" => &[OpenFilter { name: "Swatch Exchange (ASE)", extensions: &["ase"] }],
         "script" => &[OpenFilter { name: "Script", extensions: &["dcscript", "txt", "json"] }],
+        "shortcuts" => &[OpenFilter { name: "Shortcut set (text)", extensions: &["txt"] }],
         "icc" => &[OpenFilter { name: "ICC profile", extensions: &["icc", "icm"] }],
         "book" => &[OpenFilter { name: "Book", extensions: &["dcbook"] }],
         "xml" => &[OpenFilter { name: "XML", extensions: &["xml"] }],
@@ -255,7 +256,7 @@ const ALL_FILES: &str = if cfg!(target_os = "macos") { "public.data" } else { "*
 /// The extension of the file name a save dialog suggests (`Brochure.designcraft`), if it has one.
 /// The dialog filters on it, so the macOS and Windows dialogs add it to a name typed without it.
 fn suggested_extension(name: &str) -> Option<&str> {
-    std::path::Path::new(name).extension().and_then(|e| e.to_str()).filter(|e| !e.is_empty() && !e.contains(char::is_whitespace))
+    std::path::Path::new(name).extension().and_then(std::ffi::OsStr::to_str).filter(|e| !e.is_empty() && !e.contains(char::is_whitespace))
 }
 
 /// The file a save dialog's answer writes: `picked` with the suggested extension added when it has
@@ -276,12 +277,27 @@ fn picked_save_path(picked: std::path::PathBuf, ext: Option<&str>) -> std::path:
     s.into()
 }
 
+/// The folder a save dialog starts in and the name it suggests. A suggestion with a folder in
+/// front (the document's, or the last one used) starts there while that folder still exists;
+/// otherwise the system picks, as it did before.
+fn save_dialog_start(suggested: &str) -> (Option<std::path::PathBuf>, String) {
+    let path = std::path::Path::new(suggested);
+    let name = path.file_name().map_or_else(|| suggested.to_string(), |n| n.to_string_lossy().to_string());
+    let folder = path.parent().filter(|f| !f.as_os_str().is_empty() && f.is_dir()).map(std::path::Path::to_path_buf);
+    (folder, name)
+}
+
 /// The save dialog: the suggested name's extension as its filter, and the extension added to a
 /// name typed without it. Adding it names another file than the one the dialog checked, so
 /// replacing an existing one asks again.
-fn pick_save(name: &str) -> Option<String> {
+fn pick_save(suggested: &str) -> Option<String> {
+    let (folder, name) = save_dialog_start(suggested);
+    let name = name.as_str();
     let ext = suggested_extension(name);
     let mut dialog = rfd::FileDialog::new().set_file_name(name);
+    if let Some(folder) = folder {
+        dialog = dialog.set_directory(folder);
+    }
     if let Some(ext) = ext {
         dialog = dialog.add_filter(ext.to_ascii_uppercase(), &[ext]);
     }
@@ -604,6 +620,17 @@ mod tests {
         assert_eq!(save("/d/Brochure", "Untitled.pdf"), PathBuf::from("/d/Brochure.pdf"));
         assert_eq!(save("/d/Brochure.txt", "Untitled.rtf"), PathBuf::from("/d/Brochure.txt"), "another export format is kept");
         assert_eq!(save("/d/Package", "Untitled 1.2 Folder"), PathBuf::from("/d/Package"), "a folder has no extension");
+    }
+
+    /// #1653: the save dialog opens in the folder the suggestion names, unless it is gone.
+    #[test]
+    fn save_dialog_starts_in_the_suggested_folder_while_it_exists() {
+        let folder = std::env::temp_dir();
+        let suggested = folder.join("Brochure.pdf");
+        assert_eq!(super::save_dialog_start(&suggested.to_string_lossy()), (Some(folder.clone()), "Brochure.pdf".to_string()));
+        let gone = folder.join(format!("designcraft-gone-{}", std::process::id())).join("Brochure.pdf");
+        assert_eq!(super::save_dialog_start(&gone.to_string_lossy()), (None, "Brochure.pdf".to_string()), "a folder deleted since: the system's own");
+        assert_eq!(super::save_dialog_start("Untitled 1.2 Folder"), (None, "Untitled 1.2 Folder".to_string()), "a bare name: the system's own");
     }
 }
 

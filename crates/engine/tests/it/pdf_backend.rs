@@ -207,7 +207,9 @@ fn failed_layer_rewrite_aborts_export_instead_of_revealing_hidden_content() {
     session.execute("file.new", &json!({"width": 100, "height": 100, "pages": 1})).unwrap();
     let placed =
         session.execute("file.place", &json!({"base64": base64_encode(&bytes), "name": "missing-layers.pdf", "x": 0, "y": 0, "width": 100})).unwrap();
-    session.execute("object.layerOptions", &json!({"ids": [placed["id"]], "hidden": ["Red"]})).unwrap();
+    // Commands now reject unrewritable choices. Simulate stale persisted state after relinking.
+    let id: designcraft_doc::ItemId = serde_json::from_value(placed["id"].clone()).unwrap();
+    std::sync::Arc::make_mut(&mut session.doc_mut().unwrap().doc).item_mut(id).unwrap().pdf_hidden_layers = vec!["Red".into()];
     let before = session.execute("file.serialize", &json!({})).unwrap();
     let result = session.execute("file.exportPdf", &json!({}));
     assert!(result.is_err(), "failed layer hiding must not export the original visible layers");

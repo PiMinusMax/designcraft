@@ -371,7 +371,7 @@ fn locale_code(words: &[&str]) -> Option<String> {
 /// from documents, so at most [`MAX_TAGS`] are kept; past that a new tag is unknown (`None`).
 fn intern_tag(tag: String) -> Option<&'static str> {
     const MAX_TAGS: usize = 512;
-    static TAGS: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    static TAGS: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
     let mut tags = TAGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(t) = tags.iter().find(|t| **t == tag) {
         return Some(t);
@@ -1270,6 +1270,9 @@ attr_set! {
         number_expression: String = "^#.^t".into(),
         /// Text after the bullet (metacharacters expand as in [`expand_list_text`]).
         list_separator: String = "\t".into(),
+        /// The hanging indent was set by the Bulleted or Numbered List button, which takes it away
+        /// again with the list (an indent the paragraph had before stays).
+        list_hang: bool = false,
         balance_ragged: bool = false,
         optical_margin: bool = false,
         /// None uses the legacy built-in rules; an empty set explicitly disables kinsoku.

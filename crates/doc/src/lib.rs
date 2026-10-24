@@ -147,6 +147,17 @@ impl Default for BaselineGrid {
     }
 }
 
+impl BaselineGrid {
+    /// The first grid line on `page`, measured down from the page top: `start` from the top of
+    /// the page or from its top margin. The other lines follow every `increment` below it.
+    pub fn origin(&self, page: &page::Page) -> f64 {
+        match self.relative_to {
+            GridRelative::TopOfPage => self.start,
+            GridRelative::TopMargin => self.start + page.margins.top,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DocumentGrid {

@@ -3,10 +3,10 @@
 //! what a click does (add, delete, close, convert, continue), and a curved double arrow for rotating.
 //! Cursors without a glyph stay system cursors.
 //!
-//! Linux and Windows show the glyphs as OS cursors ([`Images`]): the system moves them itself, so
-//! they never trail the pointer. macOS sizes a cursor bitmap in points (a Retina one would show
-//! twice as big, or blurred), so there the canvas paints the glyph at the pointer. The
-//! web build keeps the system cursors.
+//! Linux (X11) and Windows show the glyphs as OS cursors ([`Images`]): the system moves them itself,
+//! so they never trail the pointer. macOS sizes a cursor bitmap in points (a Retina one would show
+//! twice as big, or blurred) and a Wayland session (native or through XWayland) scales it by its own
+//! rules, so there the canvas paints the glyph at the pointer. The web build keeps the system cursors.
 
 use egui::epaint::{Mesh, TessellationOptions, Tessellator, Vertex};
 use egui::{Color32, CustomCursorImage, Pos2, Shape, Stroke, Vec2, pos2, vec2};
@@ -27,13 +27,32 @@ pub enum Mode {
     System,
 }
 
-pub const MODE: Mode = if cfg!(target_arch = "wasm32") {
-    Mode::System
-} else if cfg!(target_os = "macos") {
-    Mode::Painted
-} else {
-    Mode::Os
-};
+/// The mode for a platform: `wayland` is true on a Linux Wayland session.
+fn mode_for(wasm: bool, macos: bool, wayland: bool) -> Mode {
+    if wasm {
+        Mode::System
+    } else if macos || wayland {
+        Mode::Painted
+    } else {
+        Mode::Os
+    }
+}
+
+/// Whether the environment describes a Wayland session: a Wayland display, unless the session says X11.
+fn is_wayland(wayland_display: Option<&str>, session_type: Option<&str>) -> bool {
+    wayland_display.is_some_and(|d| !d.is_empty()) && !session_type.is_some_and(|t| t.eq_ignore_ascii_case("x11"))
+}
+
+/// How cursor glyphs are shown on this system. On Wayland the compositor sizes a cursor bitmap by
+/// its own scale, so the OS glyph came out far too big; there the canvas paints it, as on macOS.
+pub fn mode() -> Mode {
+    static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let wayland = cfg!(target_os = "linux")
+            && is_wayland(std::env::var("WAYLAND_DISPLAY").ok().as_deref(), std::env::var("XDG_SESSION_TYPE").ok().as_deref());
+        mode_for(cfg!(target_arch = "wasm32"), cfg!(target_os = "macos"), wayland)
+    })
+}
 
 /// The shapes of one glyph: every halo goes under all the ink, so one part's halo never cuts
 /// through another part's ink.
@@ -289,9 +308,9 @@ pub fn system(c: Cursor) -> egui::CursorIcon {
 }
 
 /// Show cursor `c` with the pointer at `hover` (screen points): set the OS cursor bitmap or paint
-/// the glyph per [`MODE`], and return the cursor icon to set.
+/// the glyph per [`mode`], and return the cursor icon to set.
 pub fn show(ctx: &egui::Context, images: &mut Images, c: Cursor, hover: Pos2) -> egui::CursorIcon {
-    match MODE {
+    match mode() {
         Mode::Os => {
             // The glyphs keep the system cursors' size whatever the interface scale.
             let ppp = ctx.pixels_per_point() / ctx.zoom_factor().max(0.01);
@@ -357,6 +376,19 @@ mod tests {
             assert!(rasterize(c, 1.0).is_none(), "{c:?} stays a system cursor");
         }
         assert!(rasterize(Cursor::Pen, f32::NAN).is_none() && rasterize(Cursor::Pen, 0.0).is_none());
+    }
+
+    #[test]
+    fn wayland_paints_the_glyphs_and_x11_keeps_os_cursors() {
+        assert_eq!(mode_for(false, false, true), Mode::Painted);
+        assert_eq!(mode_for(false, false, false), Mode::Os);
+        assert_eq!(mode_for(false, true, false), Mode::Painted);
+        assert_eq!(mode_for(true, false, true), Mode::System);
+        assert!(is_wayland(Some("wayland-0"), Some("wayland")));
+        assert!(is_wayland(Some("wayland-0"), None));
+        assert!(!is_wayland(Some("wayland-0"), Some("x11")));
+        assert!(!is_wayland(Some(""), Some("wayland")));
+        assert!(!is_wayland(None, Some("wayland")));
     }
 
     #[test]

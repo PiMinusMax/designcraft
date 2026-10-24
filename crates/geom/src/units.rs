@@ -286,6 +286,8 @@ pub fn format_measure_prec(pt: f64, unit: Unit, decimals: usize) -> String {
                 whole += 1.0;
                 rest = 0.0;
             }
+            // Decide the sign from the rounded value so float noise doesn't print "-0p0".
+            let neg = neg && (whole > 0.0 || rest > 0.0);
             let sep = if unit == Unit::Picas { 'p' } else { 'c' };
             format!("{}{}{}{}", if neg { "-" } else { "" }, whole as i64, sep, trim(rest))
         }
@@ -302,6 +304,14 @@ mod tests {
     }
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    /// Tiny negatives that round to zero must not print a sign.
+    #[test]
+    fn tiny_negative_picas_ciceros_have_no_sign() {
+        assert_eq!(format_measure(-0.0004, Unit::Picas), "0p0");
+        assert_eq!(format_measure(-0.0004, Unit::Ciceros), "0c0");
+        assert_eq!(format_measure(-12.0, Unit::Picas), "-1p0");
     }
 
     /// Inches show four decimals, as InDesign's fields do; other units three.

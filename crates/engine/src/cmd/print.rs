@@ -17,7 +17,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Print…",
             ["File"],
             Some("Cmd+P"),
-            "{printer?, copies?: 1, pages?: \"1-3,5\", spreads?, marks?, bleed?, dryRun?: bool (export and preview submission without printing)} → {printer, copies, pages, command, bytes}",
+            "{printer?, copies?: 1, pages?: \"1-3,5\", spreads?, marks?, bleed?, dryRun?: bool (export and preview submission without printing), created?: int (Unix seconds, as file.exportPdf)} → {printer, copies, pages, command, bytes}",
             has_doc,
             print
         ),
@@ -95,7 +95,8 @@ mod tests {
     fn print_submits_the_selected_export_and_reports_refusal() {
         let mut s = Session::new();
         s.execute("file.new", &json!({"pages": 4})).unwrap();
-        let params = json!({"printer": "Office (east)", "copies": 2, "pages": "2-3", "marks": true, "bleed": true});
+        // A fixed creation date: both exports would otherwise take the clock's second.
+        let params = json!({"printer": "Office (east)", "copies": 2, "pages": "2-3", "marks": true, "bleed": true, "created": 1_700_000_000});
         let expected = {
             let d = &s.doc().unwrap().doc;
             let options = super::super::export::options(&params, d.page_count()).unwrap();
@@ -118,5 +119,6 @@ mod tests {
         assert!(refusal.to_string().contains("printer offline"));
         print_with(&mut s, &json!({"dryRun": true}), |_, _| panic!("dry runs must not spool")).unwrap();
         assert!(print_with(&mut s, &json!({"pages": "9"}), |_, _| panic!("invalid ranges must not spool")).is_err());
+        assert!(print_with(&mut s, &json!({"created": "today"}), |_, _| panic!("an invalid date must not spool")).is_err());
     }
 }

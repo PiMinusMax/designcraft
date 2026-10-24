@@ -1,6 +1,6 @@
 # Where DesignCraft falls short of InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-17 · **Change:** minor (gap 6 shrunk: Type › Reload Fonts reads fonts installed, edited or removed while running (#328); gap 3: Package links are relative, #340; gap 27 closed: the loaded text cursor threads into a frame inside a group (#1075); .indd and .indt open through indd-utils; gap 0 shrunk: text threads by hand; threading gaps added; Optical kerning from outlines (#181); gap 6: macOS lists fonts that font services and managers activate; shared print spooler; image clipping paths from IDML; Tabs panel listed as present (#343); book chapter update safety; gap 16: Based on Parent leftovers; bounded control click/drag input; swatches on placed greyscale and bitmap images) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (gap 28 added: placed-PDF font repair remains after visible unembedded font detection, #909; gap 26 shrunk: autoflow fills the following pages before it adds pages at the end; gap 6 shrunk: Type › Reload Fonts reads fonts installed, edited or removed while running (#328); gap 3: Package links are relative, #340; gap 27 closed: the loaded text cursor threads into a frame inside a group (#1075); .indd and .indt open through indd-utils; gap 0 shrunk: text threads by hand; threading gaps added; Optical kerning from outlines (#181); gap 6: macOS lists fonts that font services and managers activate; shared print spooler; image clipping paths from IDML; Tabs panel listed as present (#343); book chapter update safety; gap 16: Based on Parent leftovers; bounded control click/drag input; swatches on placed greyscale and bitmap images) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every known shortfall against InDesign 2026, one entry each, ranked by how much it stops an
 InDesign professional from doing real work. This is the work list: agents pick from the top.
@@ -123,6 +123,18 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
   spot, marks and bleed, the options dialog with remembered settings (#196).
 - **Estimate:** 40–70 h. **Doc:** [file-format-parity.md](file-format-parity.md)
 
+### 28. Placed-PDF font repair for PDF/X-4 (FF)
+- **Missing:** embedding, substitution or outlining of unembedded fonts in placed PDFs; export
+  does not automatically embed or outline them.
+- **Have:** PDF/X-4 export warnings and `validate-pdf` report unembedded fonts drawing visible
+  text, including inside placed PDF forms, with font names and pages (#909). Invisible text
+  (render mode 3) is exempt from this font-embedding check. A document-wide operation limit and a
+  form-nesting depth limit report incomplete font checks rather than traversing pathological
+  nesting.
+- **Impact:** detection now ships, but a placed PDF with visible unembedded fonts still needs
+  font repair before it can meet PDF/X-4 requirements.
+- **Doc:** [file-format-parity.md](file-format-parity.md)
+
 ### 10. Printing (H, F)
 - **Missing:** PostScript, a printer-driver options UI, separations to device, print presets, or trapping.
 - **Have:** `file.print` exports selected pages/spreads with marks and bleed, then submits through
@@ -190,6 +202,9 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 - **Estimate:** 20–35 h.
 
 ### 19. Placed graphics depth (FF)
+- **Safety:** PDF visibility variants preserve catalog/configuration entries and nonzero-generation
+  references, redefining the existing catalog rather than choosing an arbitrary object number.
+  Encrypted, hybrid-reference and over-budget rewrites are rejected; no print-fidelity claim.
 - **Missing:** EPS is shown through its preview only (no PostScript interpreter); PSD layer
   comps beyond visibility; the Clipping Path Options dialog (tracing into a clip that keeps the
   frame, Threshold/Tolerance/Inset Frame preview, picking an alpha channel or a path saved in a
@@ -206,13 +221,11 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
   parallel story composition.
 - **Estimate:** 40–80 h.
 
-### 26. Autoflow fills the following pages before it adds pages (F)
-- **Missing:** Shift-click autoflow (and autoflow on Place) always adds new pages after the
-  story's last frame, one margin-sized frame each. InDesign first threads a frame per column on
-  the existing pages that follow, then adds pages at the end of the document.
-- **Impact:** autoflowing into a document that already has pages inserts new pages in the
-  middle of it instead of using the empty pages.
-- **Estimate:** 4–8 h.
+### 26. Autoflow flows into the primary text frame of the pages that follow (F)
+- **Missing:** autoflow threads a frame per column on the pages that follow, then adds pages at
+  the end of the document, as InDesign does. On a page whose parent has a primary text frame it
+  still sets a new frame instead of flowing into the primary one.
+- **Estimate:** 2–4 h.
 
 ## Lower
 
@@ -249,6 +262,8 @@ Cue. These are excluded from every percentage.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Gap 26 shrunk: autoflow threads a frame per column on the pages that follow the story's last frame, then adds pages at the end of the document |
+| 2026-10-19 | minor | Gap 28 added for remaining placed-PDF font embedding, substitution or outlining; visible unembedded font detection now ships in PDF/X-4 export and `validate-pdf`, with invisible text exempt and operation- or depth-limited checks reported incomplete (#909) |
 | 2026-10-16 | minor | Gap 27 closed: the loaded text cursor threads into a text frame inside a group (#1075) |
 | 2026-10-16 | trivial | Gap 13 shrunk: Greek hyphenates, so five languages do (#1077) |
 | 2026-10-13 | minor | Gap 16: Parent Options dialog and overrides of base items on a parent spread |

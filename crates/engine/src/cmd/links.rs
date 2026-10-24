@@ -144,7 +144,7 @@ pub fn link_missing(a: &designcraft_doc::Asset, document: Option<&Path>) -> bool
     let Some(link) = &a.link else { return false };
     #[cfg(not(target_arch = "wasm32"))]
     {
-        crate::io::document_path(link, document).map_or(true, |path| !crate::io::exists(path))
+        !crate::io::document_path(link, document).is_ok_and(crate::io::exists)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -480,7 +480,7 @@ fn relink_folder(s: &mut Session, p: &Value) -> Result<Value> {
             continue;
         }
         let old = std::path::PathBuf::from(a.link.clone().unwrap_or_else(|| a.name.clone()));
-        let mut name = old.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| a.name.clone().into());
+        let mut name = old.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_else(|| a.name.clone().into());
         if let Some(e) = &ext {
             name = std::path::Path::new(&name).with_extension(e).into_os_string();
         }
@@ -490,8 +490,18 @@ fn relink_folder(s: &mut Session, p: &Value) -> Result<Value> {
             Some(dir) => Some(dir.clone()),
             None => a.link.as_deref().and_then(|l| crate::io::document_path(l, document).ok()).and_then(|p| p.parent().map(Path::to_path_buf)),
         };
-        let plain_name = name.to_str().is_some_and(|n| !n.contains(['/', '\\']) && craft_docpath::is_local(n));
-        let cand = folder.filter(|_| plain_name).map(|f| f.join(&name));
+        let plain_name = name.to_str().filter(|n| !n.contains(['/', '\\']));
+        // A name that resolves to another file name (a `file:` URL such as `file:%2Ftmp%2Fx.png`,
+        // a drive-relative `C:x.png`) or a folder the stored-path rules read differently (`a\b`
+        // on Unix, `alias/..` through a symlink) could lead outside the folder, so only the name
+        // itself, directly in the folder as the file system resolves it, counts. The link keeps
+        // the folder as given.
+        let cand = folder.zip(plain_name).and_then(|(f, n)| {
+            let c = crate::io::folder_path(n, &f).ok()?;
+            let real = |p: &Path| crate::io::canonicalize(p).ok();
+            let same_folder = c.parent().and_then(real).is_some_and(|p| real(&f) == Some(p));
+            (c.file_name().is_some_and(|c| c == n) && same_folder).then_some(c)
+        });
         if let Some(cand) = cand.filter(|c| crate::io::exists(c)) {
             todo.push((a.id, cand));
         } else {

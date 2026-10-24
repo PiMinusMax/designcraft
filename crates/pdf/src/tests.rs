@@ -340,6 +340,26 @@ fn cmyk_tiff_keeps_its_inks() {
     }
 }
 
+/// A placed greyscale TIFF went into PDFs as DeviceRGB, unlike a greyscale PNG or JPEG (#1426):
+/// a page holding only a black-and-white scan declared colour.
+#[test]
+fn grey_tiff_exports_as_device_gray() {
+    let px: Vec<u8> = vec![0, 64, 128, 255, 255, 128, 64, 0];
+    let mut tif = Vec::new();
+    tiff::encoder::TiffEncoder::new(std::io::Cursor::new(&mut tif)).unwrap().write_image::<tiff::encoder::colortype::Gray8>(4, 2, &px).unwrap();
+    let mut d = doc_with_text("x");
+    place(&mut d, tif, (4, 2));
+    for standard in [Standard::None, Standard::PdfX4] {
+        let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions { standard, ..Default::default() }).unwrap();
+        assert!(r.warnings.is_empty(), "{standard:?}: {:?}", r.warnings);
+        assert_eq!(image_xobjects(&r.bytes), vec![("DeviceGray".to_string(), px.clone())], "{standard:?}");
+    }
+    // Recompressed, it stays a grey JPEG.
+    let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions { compress_images: true, compress: false, ..Default::default() }).unwrap();
+    let s = String::from_utf8_lossy(&r.bytes);
+    assert!(s.contains("/DCTDecode") && s.contains("/DeviceGray") && !s.contains("/DeviceRGB"), "a grey JPEG");
+}
+
 /// An 8×8 raster encoded as `fmt`; `alpha` gives it a transparent corner.
 fn raster(fmt: image::ImageFormat, alpha: bool) -> Vec<u8> {
     let img =

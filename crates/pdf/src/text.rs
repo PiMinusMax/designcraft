@@ -160,7 +160,7 @@ fn cluster_chars(members: &[PlacedGlyph], cluster: &str) -> Option<Vec<(usize, c
 fn text_rules(cs: &ComposedStory, ft: &FrameText, underline: bool) -> Vec<(designcraft_compose::Rule, Rect)> {
     let mut bars: Vec<(designcraft_compose::Rule, Rect)> = Vec::new();
     for line in &ft.lines {
-        for g in line.glyphs.iter().filter(|g| g.visible) {
+        for g in line.glyphs.iter().filter(|g| g.spans_rules()) {
             let style = &cs.styles[g.style as usize];
             let (on, rule) = if underline { (style.underline, &style.underline_rule) } else { (style.strikethrough, &style.strike_rule) };
             if !on {
@@ -303,6 +303,25 @@ impl Exporter<'_> {
         });
     }
 
+    /// One table cell's graphic, or its text composed in the cell's own area.
+    fn table_cell(&mut self, s: &mut Surface, c: &designcraft_compose::PlacedCell) {
+        if let Some(g) = &c.graphic {
+            if let Some(clip) = to_path(&c.clip.to_path(0.1)) {
+                s.push_clip_path(&clip, &krilla::paint::FillRule::NonZero);
+                s.push_transform(&tf(Affine::translate((c.clip.x0, c.clip.y0))));
+                self.graphic(s, g);
+                s.pop();
+                s.pop();
+            }
+        } else if let Some(cft) = c.text.frames.first() {
+            s.push_transform(&tf(Affine::translate(c.origin.to_vec2())));
+            let area = std::mem::replace(&mut self.text_area, lines_area(cft));
+            self.frame_text(s, &c.text, cft, &c.source);
+            self.text_area = area;
+            s.pop();
+        }
+    }
+
     /// Table fragments: cell fills, cell text (real text), edges and the border.
     fn tables(&mut self, s: &mut Surface, ft: &FrameText) {
         for t in &ft.tables {
@@ -314,21 +333,7 @@ impl Exporter<'_> {
                 }
             }
             for c in &t.cells {
-                if let Some(g) = &c.graphic {
-                    if let Some(clip) = to_path(&c.clip.to_path(0.1)) {
-                        s.push_clip_path(&clip, &krilla::paint::FillRule::NonZero);
-                        s.push_transform(&tf(Affine::translate((c.clip.x0, c.clip.y0))));
-                        self.graphic(s, g);
-                        s.pop();
-                        s.pop();
-                    }
-                } else if let Some(cft) = c.text.frames.first() {
-                    s.push_transform(&tf(Affine::translate(c.origin.to_vec2())));
-                    let area = std::mem::replace(&mut self.text_area, lines_area(cft));
-                    self.frame_text(s, &c.text, cft, &c.source);
-                    self.text_area = area;
-                    s.pop();
-                }
+                self.table_cell(s, c);
             }
             for seg in &t.strokes {
                 let st = &seg.stroke;
@@ -637,4 +642,40 @@ fn glyph_outlines(glyphs: &[PlacedGlyph], size: f64, tan: f64) -> BezPath {
         bp.extend(o.iter());
     }
     bp
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+    use designcraft_compose::Cache;
+    use designcraft_doc::{Document, ParaFormat, SpreadRef};
+    use designcraft_geom::Rect;
+
+    /// A tab draws nothing but advances to its stop, and the underline runs across it, as it does
+    /// on screen: a form's fill-in lines are underlined tabs (#1466).
+    #[test]
+    fn an_underline_runs_across_a_tab() {
+        let mut doc = Document::new(&Default::default());
+        for style in &mut doc.styles_mut().paragraph {
+            style.chars.underline = Some(true);
+        }
+        let layer = doc.default_layer();
+        let (_, sid) =
+            doc.add_text_frame(SpreadRef::Doc(0), Rect::new(36.0, 36.0, 400.0, 300.0), layer, "Name\tCity", ParaFormat::default()).unwrap();
+        let cs = Cache::new().get(&doc, sid, None);
+        let line = &cs.frames[0].lines[0];
+        let tab = line.glyphs.iter().find(|g| g.rendered_char == '\t').expect("the tab is placed on the line");
+        let bars = text_rules(&cs, &cs.frames[0], true);
+        assert_eq!(bars.len(), 1, "one bar across the line, not one before the tab and one after: {bars:?}");
+        let bar = bars[0].1;
+        assert!(bar.x0 <= tab.x + 0.5 && bar.x1 >= tab.x + tab.adv - 0.5, "the bar covers the tab: {bar:?}, tab {} + {}", tab.x, tab.adv);
+        // The strikethrough of the same text behaves the same way.
+        for style in &mut doc.styles_mut().paragraph {
+            style.chars.underline = None;
+            style.chars.strikethrough = Some(true);
+        }
+        let cs = Cache::new().get(&doc, sid, None);
+        assert!(text_rules(&cs, &cs.frames[0], true).is_empty(), "no underline now");
+        assert_eq!(text_rules(&cs, &cs.frames[0], false).len(), 1, "one strike across the line");
+    }
 }

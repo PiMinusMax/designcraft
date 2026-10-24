@@ -7,7 +7,7 @@
 //! can't be reused by other allocations while the entry lives.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use designcraft_doc::{Document, Item, Story, StoryId, Styles};
 
@@ -186,7 +186,7 @@ impl Cache {
         }
         // Advanced Type sizes super/subscripts.
         let a = doc.settings.advanced_type;
-        sig.extend([a.superscript_size, a.superscript_position, a.subscript_size, a.subscript_position].map(|v| v.to_bits() as usize));
+        sig.extend([a.superscript_size, a.superscript_position, a.subscript_size, a.subscript_position].into_iter().flat_map(bits));
         // Missing glyphs: fallback fonts or the font's box.
         sig.push(usize::from(doc.settings.glyph_fallback));
         // Named lists continue from earlier stories.
@@ -196,7 +196,7 @@ impl Cache {
             sig.push(std::hash::Hasher::finish(&h) as usize);
         }
         {
-            let mut g = self.map.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = self.map.lock().unwrap_or_else(PoisonError::into_inner);
             g.1 += 1;
             let stamp = g.1;
             if let Some(e) = g.0.get_mut(&key)
@@ -216,7 +216,7 @@ impl Cache {
             &ComposeOptions { page_name, section_marker, page, running, label: None, xrefs: with_xrefs.then(|| self.xref_index(doc)) },
             &others.iter().map(|o| &**o).collect::<Vec<_>>(),
         ));
-        let mut g = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.map.lock().unwrap_or_else(PoisonError::into_inner);
         let stamp = g.1;
         if g.0.len() > 4096 {
             g.0.retain(|_, e| stamp - e.stamp < 64);
@@ -228,7 +228,7 @@ impl Cache {
             && cross
             && let Some(old) = replaced
         {
-            self.previous.lock().unwrap_or_else(|e| e.into_inner()).insert(sid, (old.sig, old.out));
+            self.previous.lock().unwrap_or_else(PoisonError::into_inner).insert(sid, (old.sig, old.out));
         }
         out
     }
@@ -241,7 +241,7 @@ impl Cache {
         // Only the geometry/story part of the signature (variables etc. add to it).
         let matches = |s: &[usize]| s.len() >= sig.len() && s[..sig.len()] == sig[..];
         {
-            let g = self.map.lock().unwrap_or_else(|e| e.into_inner());
+            let g = self.map.lock().unwrap_or_else(PoisonError::into_inner);
             for cross in [true, false] {
                 if let Some(e) = g.0.get(&(sid, ShownOn::Own, cross))
                     && matches(&e.sig)
@@ -250,7 +250,7 @@ impl Cache {
                 }
             }
         }
-        let g = self.previous.lock().unwrap_or_else(|e| e.into_inner());
+        let g = self.previous.lock().unwrap_or_else(PoisonError::into_inner);
         g.get(&sid).filter(|(s, _)| matches(s)).map(|(_, c)| c.clone())
     }
 
@@ -306,36 +306,43 @@ impl Cache {
     }
 
     pub fn clear(&self) {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).0.clear();
-        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.xrefs.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.map.lock().unwrap_or_else(PoisonError::into_inner).0.clear();
+        *self.running.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.xrefs.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Anchor pages for cross-references (rebuilt when the document changes).
     pub fn xref_index(&self, doc: &Document) -> Arc<crate::xref::XrefIndex> {
         let sig = doc_signature(doc);
-        if let Some((s, r)) = &*self.xrefs.lock().unwrap_or_else(|e| e.into_inner())
+        if let Some((s, r)) = &*self.xrefs.lock().unwrap_or_else(PoisonError::into_inner)
             && *s == sig
         {
             return r.clone();
         }
         let r = Arc::new(crate::xref::XrefIndex::build(doc, &|sid| self.get(doc, sid, None)));
-        *self.xrefs.lock().unwrap_or_else(|e| e.into_inner()) = Some((sig, r.clone()));
+        *self.xrefs.lock().unwrap_or_else(PoisonError::into_inner) = Some((sig, r.clone()));
         r
     }
 
     /// The running-header index for `doc` (rebuilt when the document changes).
     pub fn running_index(&self, doc: &Document) -> Arc<RunningIndex> {
         let sig = doc_signature(doc);
-        if let Some((s, r)) = &*self.running.lock().unwrap_or_else(|e| e.into_inner())
+        if let Some((s, r)) = &*self.running.lock().unwrap_or_else(PoisonError::into_inner)
             && *s == sig
         {
             return r.clone();
         }
         let r = Arc::new(RunningIndex::build(doc, &|sid| self.get(doc, sid, None)));
-        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some((sig, r.clone()));
+        *self.running.lock().unwrap_or_else(PoisonError::into_inner) = Some((sig, r.clone()));
         r
     }
+}
+
+/// Both halves of `v`'s bits: a 32-bit `usize` (wasm) would drop the high half, where whole
+/// numbers keep their differences.
+fn bits(v: f64) -> [usize; 2] {
+    let b = v.to_bits();
+    [(b & 0xffff_ffff) as usize, (b >> 32) as usize]
 }
 
 fn signature(doc: &Document, story: &Arc<Story>) -> (Vec<usize>, Vec<Arc<Item>>) {
@@ -348,9 +355,9 @@ fn signature(doc: &Document, story: &Arc<Story>) -> (Vec<usize>, Vec<Arc<Item>>)
         Arc::as_ptr(&doc.styles) as usize,
         sections_hash(doc) as usize,
         doc.font_scope as usize,
-        g.start.to_bits() as usize,
-        g.increment.to_bits() as usize,
+        usize::from(g.relative_to == designcraft_doc::GridRelative::TopMargin),
     ];
+    sig.extend([g.start, g.increment].into_iter().flat_map(bits));
     let mut keep = Vec::new();
     let mut spreads = Vec::new();
     for f in &story.frames {
@@ -373,6 +380,12 @@ fn signature(doc: &Document, story: &Arc<Story>) -> (Vec<usize>, Vec<Arc<Item>>)
             sig.push(loc.top());
             if !spreads.contains(&loc.spread) {
                 spreads.push(loc.spread);
+                // The page under a frame (found by x) gives its grid origin, page rect and side.
+                for p in &sp.pages {
+                    let m = &p.margins;
+                    sig.extend([p.x, p.width, p.height, m.top, m.bottom, m.inside, m.outside].into_iter().flat_map(bits));
+                    sig.push(p.side as usize);
+                }
                 for it in &sp.items {
                     let mut wraps = false;
                     it.walk(&mut |i| wraps |= i.has_wrap());

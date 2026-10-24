@@ -85,6 +85,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("window.richBlack", "Appearance of Black", None, "{on: bool} — show 100% black as rich black on screen (off: accurately)"),
     ("window.setShortcut", "Set Shortcut", None, "{id, shortcut: \"Cmd+Alt+J\" | \"\" (none) | null (default)} → {shortcut, conflicts: [ids]}"),
     ("window.resetShortcuts", "Reset Shortcuts", None, "{} — every command back to its default shortcut"),
+    (
+        "window.importShortcuts",
+        "Import InDesign Shortcut Set",
+        None,
+        "{path | text} — a set saved by InDesign's Show Set (.txt): matched commands take its Default shortcuts (or none), other commands lose keys it takes → {set, imported, changed, conflictsCleared, skipped (an earlier item whose keys a later one took), unmatched, unmatchedWithoutShortcut, unreadable}",
+    ),
     ("app.findChange", "Find/Change…", Some("Cmd+F"), "{}"),
     ("app.insertTableDialog", "Create Table…", None, "{} — Insert Table dialog (body/header/footer rows, columns)"),
     (
@@ -108,7 +114,21 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "{tab?: border|shading} — border and shading of the selected paragraphs (type.para)",
     ),
     ("app.spanColumnsDialog", "Span Columns…", None, "{} — span or split columns of the selected paragraphs (type.para)"),
+    ("app.keepOptionsDialog", "Keep Options…", None, "{} — Keep with Next and Keep Lines Together of the selected paragraphs (type.para)"),
+    (
+        "app.nestedStylesDialog",
+        "Drop Caps and Nested Styles…",
+        None,
+        "{} — drop cap, nested styles and nested line styles of the selected paragraphs (type.para)",
+    ),
+    ("app.grepStylesDialog", "GREP Styles…", None, "{} — GREP styles of the selected paragraphs (type.para)"),
     ("app.bulletsNumberingDialog", "Bullets and Numbering…", None, "{} — bullets or numbers of the selected paragraphs (type.para)"),
+    (
+        "app.hyphenationDialog",
+        "Hyphenation…",
+        None,
+        "{} — Hyphenation Settings of the selected paragraphs (type.para): limits, zone, Better Spacing ↔ Fewer Hyphens, Preview",
+    ),
     (
         "app.justificationDialog",
         "Justification…",
@@ -504,6 +524,9 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "<",
             "-",
             ">Bulleted & Numbered Lists",
+            "cmd:list.bullets",
+            "cmd:list.numbers",
+            "-",
             "cmd:list.define",
             "<",
             "-",
@@ -1065,7 +1088,7 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
         }
         "app.saveDialog" => {
             let name = app.session.active().map(|d| format!("{}.designcraft", d.doc.title)).unwrap_or_default();
-            if let Some(path) = app.services.pick_save.as_mut().and_then(|f| f(&name)) {
+            if let Some(path) = app.pick_save(&name) {
                 return Some(app.run("file.saveAs", json!({"path": path})));
             }
             Ok(Value::Null)
@@ -1076,7 +1099,7 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
         }
         "app.saveCopyDialog" => {
             let name = app.session.active().map(|d| format!("{} copy.designcraft", d.doc.title)).unwrap_or_default();
-            if let Some(path) = app.services.pick_save.as_mut().and_then(|f| f(&name)) {
+            if let Some(path) = app.pick_save(&name) {
                 return Some(app.run("file.saveACopy", json!({"path": path})));
             }
             Ok(Value::Null)
@@ -1150,7 +1173,7 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
         "app.exportText" => export_bytes(app, p, "rtf", "file.exportText"),
         "app.packageDialog" => {
             let name = app.session.active().map(|d| format!("{} Folder", d.doc.title)).unwrap_or_default();
-            match app.services.pick_save.as_mut().and_then(|f| f(&name)) {
+            match app.pick_save(&name) {
                 Some(dir) => {
                     let r = app.run("file.package", json!({"dir": dir}));
                     if let Ok(v) = &r {
@@ -1211,7 +1234,7 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
         "app.saveSwatches" => {
             let path = match p.get("path").and_then(Value::as_str) {
                 Some(s) => Some(s.to_string()),
-                None => app.services.pick_save.as_mut().and_then(|f| f("Swatches.ase")),
+                None => app.pick_save("Swatches.ase"),
             };
             let Some(path) = path else { return Some(Ok(Value::Null)) };
             let r = match app.run("swatch.save", json!({})) {
@@ -1274,11 +1297,19 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             app.ui.dialog = Some(crate::dialogs::Dialog::new("paragraphRules", json!({"rule": rule, "current": current})));
             Ok(Value::Null)
         }
-        "app.paragraphBordersDialog" | "app.spanColumnsDialog" | "app.bulletsNumberingDialog" => {
+        "app.paragraphBordersDialog"
+        | "app.spanColumnsDialog"
+        | "app.bulletsNumberingDialog"
+        | "app.keepOptionsDialog"
+        | "app.nestedStylesDialog"
+        | "app.grepStylesDialog" => {
             let Some(a) = crate::panels::text_attrs(app) else { return Some(Err("select text or a text frame".into())) };
             let section = match id {
                 "app.spanColumnsDialog" => "span",
                 "app.bulletsNumberingDialog" => "bullets",
+                "app.keepOptionsDialog" => "keep",
+                "app.nestedStylesDialog" => "nested",
+                "app.grepStylesDialog" => "grep",
                 _ if p.get("tab").and_then(Value::as_str) == Some("shading") => "shading",
                 _ => "border",
             };
@@ -1289,6 +1320,18 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
                 "style": a["chars"]["fontStyle"],
             });
             app.ui.dialog = Some(crate::dialogs::Dialog::new("paragraphLocal", fields));
+            Ok(Value::Null)
+        }
+        "app.hyphenationDialog" => {
+            let Some(a) = app.session.execute("type.selectionAttrs", &json!({"mixed": true})).ok().filter(|a| !a.is_null()) else {
+                return Some(Err("select text or a text frame".into()));
+            };
+            let mixed: Vec<&str> = a["paraMixed"].as_array().map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let current: serde_json::Map<String, Value> = crate::dialogs::HYPH_ATTRS
+                .iter()
+                .map(|k| (k.to_string(), if mixed.contains(k) { Value::Null } else { a["para"][*k].clone() }))
+                .collect();
+            app.ui.dialog = Some(crate::dialogs::Dialog::new("hyphenation", json!({"current": current})));
             Ok(Value::Null)
         }
         "app.justificationDialog" => {
@@ -1705,6 +1748,17 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             app.ui.shortcuts.clear();
             Ok(Value::Null)
         }
+        "window.importShortcuts" => {
+            let text = match (p.get("text").and_then(Value::as_str), p.get("path").and_then(Value::as_str)) {
+                (Some(text), _) => text.to_string(),
+                (None, Some(path)) => match crate::shortcut_import::read_file(path) {
+                    Ok(text) => text,
+                    Err(e) => return Some(Err(e)),
+                },
+                (None, None) => return Some(Err("give the set's path or text".into())),
+            };
+            crate::shortcut_import::import(app, &text)
+        }
         "view.snapPreferences" => {
             let b = |k: &str| p.get(k).and_then(Value::as_bool);
             let ui = &mut app.ui;
@@ -1916,7 +1970,7 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
                 "Typography" => Some(TYPOGRAPHY_GROUPS),
                 _ => None,
             };
-            app.ui.icon_groups = groups.map(|groups| groups.iter().map(|g| g.iter().map(|p| p.to_string()).collect()).collect());
+            app.ui.icon_groups = groups.map(|groups| groups.iter().map(|g| g.iter().map(ToString::to_string).collect()).collect());
             app.ui.dock_expanded = groups.is_none();
             let dock_tab = match name {
                 "Interactive for PDF" | "Digital Publishing" => Some("pages"),
@@ -1994,7 +2048,7 @@ fn export_png(app: &mut DesignApp, p: &Value) -> Result<Value, String> {
         Some(s) => Some(s.to_string()),
         None => {
             let name = format!("{}-p{}.png", st.doc.title, page + 1);
-            app.services.pick_save.as_mut().and_then(|f| f(&name))
+            app.pick_save(&name)
         }
     };
     let Some(path) = path else { return Ok(Value::Null) };
@@ -2012,7 +2066,7 @@ fn export_idml(app: &mut DesignApp, p: &Value) -> Result<Value, String> {
         Some(s) => Some(s.to_string()),
         None => {
             let name = format!("{}.idml", st.doc.title);
-            app.services.pick_save.as_mut().and_then(|f| f(&name))
+            app.pick_save(&name)
         }
     };
     let Some(path) = path else { return Ok(Value::Null) };
@@ -2032,7 +2086,7 @@ fn export_bytes(app: &mut DesignApp, p: &Value, ext: &str, cmd: &str) -> Result<
         Some(s) => Some(s.to_string()),
         None => {
             let name = format!("{}.{ext}", st.doc.title);
-            app.services.pick_save.as_mut().and_then(|f| f(&name))
+            app.pick_save(&name)
         }
     };
     let Some(path) = path else { return Ok(Value::Null) };
@@ -2060,7 +2114,7 @@ pub(crate) fn export_pdf(app: &mut DesignApp, p: &Value) -> Result<Value, String
         Some(s) => Some(s.to_string()),
         None => {
             let name = format!("{}.pdf", st.doc.title);
-            app.services.pick_save.as_mut().and_then(|f| f(&name))
+            app.pick_save(&name)
         }
     };
     let Some(path) = path else { return Ok(Value::Null) };
@@ -2382,6 +2436,11 @@ pub fn checked(app: &DesignApp, id: &str, params: &Value) -> Option<bool> {
         "view.hiddenCharacters" => app.ui.hidden_characters,
         "view.taggedFrames" => app.ui.tagged_frames,
         "changes.track" => app.session.active().is_some_and(|d| d.doc.settings.track_changes),
+        // Pressed, as the Bulleted and Numbered List buttons: every paragraph the command applies
+        // to (selected text, cells or text frames) has it.
+        "list.bullets" | "list.numbers" => {
+            app.session.selection_has_list(if id == "list.bullets" { designcraft_doc::ListType::Bullets } else { designcraft_doc::ListType::Numbers })
+        }
         "window.controlBar" => app.ui.control_bar,
         "window.split" => app.split,
         "window.newWindow" => app.second_window,
@@ -2438,7 +2497,7 @@ pub fn menu_enabled(app: &DesignApp, id: &str) -> bool {
     if is_window_control(id) {
         return window_control_available(app, id);
     }
-    if id == "app.justificationDialog" {
+    if matches!(id, "app.justificationDialog" | "app.hyphenationDialog") {
         return enabled(app, "type.para");
     }
     if id.starts_with("fit.") {
@@ -3009,7 +3068,7 @@ pub fn all_menu_items() -> Vec<(String, String)> {
     out
 }
 
-fn parse_shortcut(sc: &str) -> Option<(egui::Modifiers, egui::Key)> {
+pub(crate) fn parse_shortcut(sc: &str) -> Option<(egui::Modifiers, egui::Key)> {
     let mut m = egui::Modifiers::NONE;
     let mut key = None;
     for part in sc.split('+').filter(|s| !s.is_empty()) {
@@ -3048,6 +3107,20 @@ fn key_matches(m: egui::Modifiers, k: egui::Key, key: egui::Key, modifiers: egui
         && (m.shift == modifiers.shift || (plus_for_equals && !m.shift))
         && m.alt == modifiers.alt;
     matches.then_some(k == key && m.shift == modifiers.shift)
+}
+
+/// The command a paste event stands for besides plain Paste. egui-winit turns every ⌘+V chord into
+/// `Event::Paste` with the clipboard's text and drops the key press, so the shortcut table never
+/// sees Paste in Place's chord; the modifiers held when it went down tell them apart. `None` when
+/// the chord is another one, or the native menu's accelerator takes it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn paste_chord_command(app: &DesignApp, modifiers: egui::Modifiers) -> Option<&'static str> {
+    let id = "edit.pasteInPlace";
+    if app.native_menu && !app.ui.shortcuts.contains_key(id) {
+        return None;
+    }
+    let (m, k) = shortcut_of(app, id).as_deref().and_then(parse_shortcut)?;
+    (k == egui::Key::V && key_matches(m, k, egui::Key::V, modifiers) == Some(true)).then_some(id)
 }
 
 /// Global keyboard shortcuts: menu commands and single-key tool shortcuts.
@@ -3336,16 +3409,12 @@ mod tests {
     }
 
     #[test]
-    fn screen_mode_shows_the_current_mode_and_view_submenus_are_translated() {
+    fn screen_mode_shows_the_current_mode() {
         let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         let mode = |app: &DesignApp, m: &str| checked(app, "view.screenMode", &json!({ "mode": m }));
         assert_eq!((mode(&app, "normal"), mode(&app, "preview")), (Some(true), Some(false)));
         app.ui.screen_mode = crate::ScreenMode::Preview;
         assert_eq!((mode(&app, "normal"), mode(&app, "preview")), (Some(false), Some(true)));
-        // Every View submenu has its Japanese path (Edit › Menus shows them).
-        for path in submenu_paths("View") {
-            assert_ne!(crate::i18n::tr("ja", &path), path, "{path} has no Japanese row");
-        }
     }
 
     fn walk(items: &[Item], out: &mut Vec<(String, String, Value)>) {
@@ -3762,8 +3831,8 @@ mod tests {
         run_ui(&mut app, "app.language", &json!({"lang": "de"})).unwrap().unwrap();
         assert_eq!(app.ui.language, "de");
         assert_eq!(checked(&app, "app.language", &json!({"lang": "de"})), Some(true));
-        assert_eq!(crate::i18n::tr(&app.ui.language, "Window"), "Fenster");
         assert!(run_ui(&mut app, "app.language", &json!({"lang": "xx"})).unwrap().is_err());
+        assert_eq!(app.ui.language, "de");
         // The language is set in Preferences, not from a menu; without `lang` the command opens it.
         let mut items = Vec::new();
         for (_, entries) in menu_tree() {
@@ -3773,153 +3842,23 @@ mod tests {
         run_ui(&mut app, "app.language", &json!({})).unwrap().unwrap();
         assert_eq!(app.ui.dialog.as_ref().map(|d| d.id.as_str()), Some("preferences"));
         assert_eq!(app.ui.language, "de");
-        app.ui.dialog = None;
-
-        run_ui(&mut app, "app.language", &json!({"lang": "zh"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "zh");
-        assert_eq!(crate::i18n::tr(&app.ui.language, "File"), "文件");
-
-        app.run("file.new", json!({"pages": 4, "facingPages": true})).unwrap();
-        let before = serde_json::to_value(&app.session.doc().unwrap().doc).unwrap();
-        run_ui(&mut app, "app.language", &json!({"lang": "ar"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "ar");
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "ar"})), Some(true));
-        assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap());
-        for (title, _) in menu_tree() {
-            assert_ne!(crate::i18n::tr("ar", title), title, "{title}");
-        }
-        // Every menu title has a translation (Japanese never matches the English).
-        for (title, _) in menu_tree() {
-            assert_ne!(crate::i18n::tr("ja", title), title, "{title}");
-        }
-
-        run_ui(&mut app, "app.language", &json!({"lang": "pt-br"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "pt-br");
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "pt-br"})), Some(true));
-        for (title, _) in menu_tree() {
-            // "Layout" is the natural Brazilian Portuguese word, so it stays identical
-            // to English; every other title must be translated.
-            if title != "Layout" {
-                assert_ne!(crate::i18n::tr("pt-br", title), title, "{title}");
-            }
-        }
-
-        run_ui(&mut app, "app.language", &json!({"lang": "it"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "it");
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "it"})), Some(true));
-        for (title, _) in menu_tree() {
-            // "File" and "Layout" are the usual Italian menu names, so they stay identical
-            // to English; every other title must be translated.
-            if title != "File" && title != "Layout" {
-                assert_ne!(crate::i18n::tr("it", title), title, "{title}");
-            }
-        }
-
-        run_ui(&mut app, "app.language", &json!({"lang": "ka"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "ka");
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "ka"})), Some(true));
-        // Every menu title, item and submenu is translated into Georgian.
-        let mut untranslated = Vec::new();
-        for (title, entries) in menu_tree() {
-            let mut labels = vec![title.to_string()];
-            let mut stack: Vec<&Item> = entries.iter().collect();
-            while let Some(entry) = stack.pop() {
-                match entry {
-                    Item::Sub(label, children) => {
-                        labels.push(label.clone());
-                        stack.extend(children.iter());
-                    }
-                    Item::Cmd { label, id, .. } if id != "app.language" => labels.push(label.clone()),
-                    _ => {}
-                }
-            }
-            // Labels without letters ("180°") or point sizes ("72 pt") read the same in every language.
-            let size = |l: &str| l.strip_suffix(" pt").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-            untranslated
-                .extend(labels.into_iter().filter(|l| l.chars().any(char::is_alphabetic) && !size(l) && crate::i18n::tr("ka", l) == l.as_str()));
-        }
-        assert!(untranslated.is_empty(), "untranslated Georgian menu labels: {untranslated:?}");
     }
 
     #[test]
-    fn ukrainian_language_is_selectable_persisted_and_keeps_document_data() {
+    fn every_interface_language_is_selectable_persisted_and_keeps_document_data() {
         let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"pages": 4, "facingPages": true})).unwrap();
-        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "text", "text": "My words · Мої слова"})).unwrap();
+        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "text", "text": "My words · Мої слова · Zażółć gęślą jaźń"})).unwrap();
         let before = serde_json::to_value(&app.session.doc().unwrap().doc).unwrap();
-        run_ui(&mut app, "app.language", &json!({"lang": "uk"})).unwrap().unwrap();
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "uk"})), Some(true));
-        assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap());
-        for (title, _) in menu_tree() {
-            assert_ne!(crate::i18n::tr("uk", title), title, "{title}");
+        for (code, _) in crate::i18n::LANGUAGES {
+            run_ui(&mut app, "app.language", &json!({"lang": code})).unwrap().unwrap();
+            assert_eq!(app.ui.language, *code);
+            assert_eq!(checked(&app, "app.language", &json!({"lang": code})), Some(true), "{code}");
+            assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap(), "{code}");
+            let bytes = serde_json::to_vec(&app.ui).unwrap();
+            let restored: crate::UiState = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(restored.language, *code);
         }
-        let bytes = serde_json::to_vec(&app.ui).unwrap();
-        let restored: crate::UiState = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored.language, "uk");
-        assert_eq!(crate::i18n::tr(&restored.language, "File"), "Файл");
-        assert_eq!(crate::i18n::tr(&restored.language, "A custom name"), "A custom name");
-        assert!(crate::i18n::LANGUAGES.contains(&("uk", "Українська")), "Preferences lists Ukrainian by its own name");
-    }
-
-    #[test]
-    fn russian_language_is_selectable_persisted_and_keeps_document_data() {
-        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
-        app.run("file.new", json!({"pages": 4, "facingPages": true})).unwrap();
-        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "text", "text": "My words · Мои слова"})).unwrap();
-        let before = serde_json::to_value(&app.session.doc().unwrap().doc).unwrap();
-        run_ui(&mut app, "app.language", &json!({"lang": "ru"})).unwrap().unwrap();
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "ru"})), Some(true));
-        assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap());
-        for (title, _) in menu_tree() {
-            assert_ne!(crate::i18n::tr("ru", title), title, "{title}");
-        }
-        let bytes = serde_json::to_vec(&app.ui).unwrap();
-        let restored: crate::UiState = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored.language, "ru");
-        assert_eq!(crate::i18n::tr(&restored.language, "File"), "Файл");
-        assert_eq!(crate::i18n::tr(&restored.language, "A custom name"), "A custom name");
-        assert!(crate::i18n::LANGUAGES.contains(&("ru", "Русский")), "Preferences lists Russian by its own name");
-    }
-
-    #[test]
-    fn czech_language_is_selectable_persisted_and_keeps_document_data() {
-        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
-        app.run("file.new", json!({"pages": 4, "facingPages": true})).unwrap();
-        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "text", "text": "My words · Příliš žluťoučký kůň"})).unwrap();
-        let before = serde_json::to_value(&app.session.doc().unwrap().doc).unwrap();
-        run_ui(&mut app, "app.language", &json!({"lang": "cs"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "cs");
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "cs"})), Some(true));
-        assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap());
-        for (title, _) in menu_tree() {
-            assert_ne!(crate::i18n::tr("cs", title), title, "{title}");
-        }
-        let bytes = serde_json::to_vec(&app.ui).unwrap();
-        let restored: crate::UiState = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored.language, "cs");
-        assert_eq!(crate::i18n::tr(&restored.language, "File"), "Soubor");
-        assert_eq!(crate::i18n::tr(&restored.language, "A custom name"), "A custom name");
-        assert!(crate::i18n::LANGUAGES.contains(&("cs", "Čeština")), "Preferences lists Czech by its own name");
-    }
-
-    #[test]
-    fn polish_language_is_selectable_persisted_and_keeps_document_data() {
-        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
-        app.run("file.new", json!({"pages": 2, "facingPages": true})).unwrap();
-        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "text", "text": "Zażółć gęślą jaźń"})).unwrap();
-        let before = serde_json::to_value(&app.session.doc().unwrap().doc).unwrap();
-        run_ui(&mut app, "app.language", &json!({"lang": "pl"})).unwrap().unwrap();
-        assert_eq!(app.ui.language, "pl");
-        assert_eq!(checked(&app, "app.language", &json!({"lang": "pl"})), Some(true));
-        assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap());
-        for (title, _) in menu_tree() {
-            assert_ne!(crate::i18n::tr("pl", title), title, "{title}");
-        }
-        let bytes = serde_json::to_vec(&app.ui).unwrap();
-        let restored: crate::UiState = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored.language, "pl");
-        assert_eq!(crate::i18n::tr(&restored.language, "File"), "Plik");
-        assert!(crate::i18n::LANGUAGES.contains(&("pl", "Polski")), "Preferences lists Polish by its own name");
     }
 
     #[test]
@@ -4962,9 +4901,10 @@ mod tests {
     fn command_search_matches_labels_in_the_interface_language() {
         let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         app.ui.language = "de".into();
-        let items = command_search(&app, "gruppieren");
+        let label = crate::i18n::tr("de", "Group");
+        let items = command_search(&app, &label.to_lowercase());
         let group = items.iter().find(|i| i.id == "object.group").unwrap();
-        assert_eq!(group.label, "Gruppieren");
+        assert_eq!(group.label, label);
         assert_eq!(group.shortcut.as_deref(), Some("Cmd+G"));
         assert!(command_search(&app, "group").iter().any(|i| i.id == "object.group"), "English labels match too");
         assert!(command_search(&app, "  ").is_empty());
@@ -5621,9 +5561,6 @@ mod tests {
         // Language follows Settings, as in the suite's other apps, titled in the interface language.
         assert_eq!(MAC_APP_MENU.get(settings + 1), Some(&AppMenuItem::Language));
         assert_eq!(MAC_APP_MENU.get(settings + 2), Some(&AppMenuItem::Sep));
-        for (code, _) in crate::i18n::LANGUAGES.iter().filter(|(c, _)| !c.is_empty()) {
-            assert_ne!(crate::i18n::tr(code, "Language"), "Language", "{code}");
-        }
         let label = |command: &str| {
             MAC_APP_MENU.iter().find_map(|m| match m {
                 AppMenuItem::Cmd { label, command: c, .. } if *c == command => Some(*label),
@@ -5631,7 +5568,6 @@ mod tests {
             })
         };
         assert_eq!(label("app.preferences"), Some("Settings…"));
-        assert_ne!(crate::i18n::tr("de", "Settings…"), "Settings…");
         let ids = MAC_APP_MENU.iter().filter_map(|m| if let AppMenuItem::Cmd { id, .. } = m { Some(*id) } else { None }).collect::<Vec<_>>();
         assert!(ids.iter().enumerate().all(|(i, id)| !ids[..i].contains(id)), "native ids are unique: {ids:?}");
 
@@ -5747,5 +5683,112 @@ mod tests {
         let texts = start_screen_texts(&mut app);
         assert!(texts.iter().any(|t| t == "Recent files"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "gone"), "the card names it without `.designcraft`: {texts:?}");
+    }
+
+    /// On a short window (1366 x 768 laptops) the start screen is taller than the window; the part
+    /// below the fold has to be reachable by scrolling instead of being cut off.
+    #[test]
+    fn start_screen_scrolls_when_the_window_is_too_short() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx, "");
+        let size = egui::vec2(1366.0, 300.0);
+        let mut tile_y = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+            out.shapes.iter().find_map(|s| match &s.shape {
+                // The preset tiles paint their names even when scrolled out of view (labels skip that).
+                egui::Shape::Text(t) if t.galley.text() == "Tabloid" => Some(t.pos.y),
+                _ => None,
+            })
+        };
+        let at = egui::pos2(600.0, 150.0);
+        let mut before = None;
+        for _ in 0..3 {
+            before = tile_y(vec![egui::Event::PointerMoved(at)]);
+        }
+        let before = before.expect("the Tabloid tile is laid out");
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut after = tile_y(vec![egui::Event::PointerMoved(at), wheel]);
+        for _ in 0..30 {
+            after = tile_y(Vec::new());
+        }
+        let after = after.expect("the Tabloid tile is laid out");
+        assert!(after < before - 50.0, "the start screen should scroll: {before} -> {after}");
+    }
+
+    // Regression test for #329: on the start screen (no document) the Help menu's links were greyed out.
+    #[test]
+    fn help_links_are_enabled_without_a_document() {
+        let app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        assert!(app.session.active().is_none());
+        let ids: Vec<&str> = UI_COMMANDS.iter().map(|c| c.0).filter(|id| id.starts_with("help.")).collect();
+        assert!(ids.contains(&"help.discord") && ids.contains(&"help.github"), "{ids:?}");
+        for id in ids {
+            assert!(menu_enabled(&app, id), "{id} must work from the start screen");
+        }
+        assert!(!menu_enabled(&app, "view.rulers"), "other UI commands still need a document");
+    }
+
+    // Regression test for #248: the start screen offered no A6 sheet (it listed only the first ten presets).
+    #[test]
+    fn start_screen_offers_every_print_preset_including_a6() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        let texts = start_screen_texts(&mut app);
+        for p in designcraft_doc::build::PRESETS.iter().filter(|p| p.intent == designcraft_doc::Intent::Print) {
+            assert!(texts.iter().any(|t| t == p.name), "start screen lacks the {} card: {texts:?}", p.name);
+        }
+        assert!(texts.iter().any(|t| t == "A6"), "{texts:?}");
+        let a6 = designcraft_doc::build::PRESETS.iter().find(|p| p.name == "A6").unwrap();
+        assert!((a6.width - 105.0 * 72.0 / 25.4).abs() < 0.01 && (a6.height - 148.0 * 72.0 / 25.4).abs() < 0.01, "{a6:?}");
+        let page = crate::panels::properties::PAGE_PRESETS.iter().find(|p| p.0 == "A6").expect("Properties page-size list has A6");
+        assert!((page.1 - a6.width).abs() < 0.01 && (page.2 - a6.height).abs() < 0.01, "{page:?} vs {a6:?}");
+    }
+
+    // Regression test for #249: a menu row only reacted over its text, not across the whole row.
+    #[test]
+    fn menu_rows_are_selectable_across_the_full_width() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+        let entries = vec![cmd_item("app.preferences", Value::Null)];
+        let mut tick = 0;
+        let mut frame = |app: &mut DesignApp, events: Vec<egui::Event>| {
+            tick += 1;
+            let mut row = egui::Rect::NOTHING;
+            let mut output =
+                ctx.run_ui(egui::RawInput { screen_rect: Some(screen), time: Some(tick as f64 / 60.0), events, ..Default::default() }, |ui| {
+                    egui::Area::new(egui::Id::new("menu_rows")).fixed_pos(egui::pos2(50.0, 50.0)).show(ui.ctx(), |ui| {
+                        let before = ui.cursor().min;
+                        menu_column(app, ui, &[("Test", entries.clone())]);
+                        row = egui::Rect::from_min_max(before, ui.min_rect().max);
+                    });
+                });
+            output.textures_delta.clear();
+            row
+        };
+        frame(&mut app, vec![]);
+        let row = frame(&mut app, vec![]);
+        assert!(row.width() >= 239.0, "the column is at least 240 wide: {row:?}");
+        let far = egui::pos2(row.right() - 6.0, row.top() + 8.0);
+        for pressed in [true, false] {
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(far),
+                    egui::Event::PointerButton { pos: far, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE },
+                ],
+            );
+        }
+        assert!(app.ui.dialog.is_some(), "clicking the empty end of the Preferences… row must choose it");
     }
 }

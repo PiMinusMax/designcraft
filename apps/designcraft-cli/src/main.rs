@@ -39,7 +39,7 @@ use designcraft_engine::Session;
 use serde_json::{Value, json};
 
 /// The usage block. Shared by `--help` (stdout, success) and an unknown command (stderr, failure).
-const USAGE: &str = "usage: designcraft-cli run [--in FILE | --sample] [--cmd ID[=JSON]]... [--page N] [--scale S] [--pdf-options JSON] [--export OUT] [--all-pages DIR]\n         (--page, --scale and --pdf-options apply to the exports that follow them)\n       designcraft-cli commands [FILTER]\n       designcraft-cli describe COMMAND\n       designcraft-cli script [FILE|-] [--in FILE | --sample] [--connect PORT] [--save OUT] [--export OUT] [--keep-going]\n       designcraft-cli app [--port PORT] COMMAND [JSON] | --method METHOD [JSON]\n       designcraft-cli mcp [--connect PORT] [--sample] [--automation-read-root DIR] [--automation-write-root DIR]\n         the two roots confine every file the agent's commands read (open, placed images, data sources, libraries) and\n         write (save, export, package) to those folders, links followed. A root left out grants none of its access.\n         They run the in-process server, so they conflict with --connect (a running app is not confined by them).\n       designcraft-cli perf [--pages N] [--runs N] [--strict]\n       designcraft-cli bench FILE [--runs N]\n       designcraft-cli links\n       designcraft-cli --version";
+const USAGE: &str = "usage: designcraft-cli run [--in FILE | --sample] [--cmd ID[=JSON]]... [--page N] [--scale S] [--pdf-options JSON] [--export OUT] [--all-pages DIR]\n         (--page, --scale and --pdf-options apply to the exports that follow them)\n       designcraft-cli commands [FILTER]\n       designcraft-cli describe COMMAND\n       designcraft-cli script [FILE|-] [--in FILE | --sample] [--connect PORT] [--save OUT] [--export OUT] [--keep-going]\n       designcraft-cli app [--port PORT] COMMAND [JSON] | --method METHOD [JSON]\n       designcraft-cli mcp [--connect PORT] [--sample] [--automation-read-root DIR] [--automation-write-root DIR]\n         the two roots confine every file the agent's commands read (open, placed images, data sources, libraries) and\n         write (save, export, package) to those folders, links followed. A root left out grants none of its access.\n         They run the in-process server, so they conflict with --connect (a running app is not confined by them).\n       designcraft-cli perf [--pages N] [--runs N] [--strict]\n       designcraft-cli bench FILE [--runs N]\n       designcraft-cli validate-pdf FILE.pdf  # built-in PDF/X-4 checks (including visible unembedded fonts)\n       designcraft-cli links\n       designcraft-cli --version";
 
 /// `script --help`: the script syntax, otherwise only in `describe script.run` and docs/agents.md.
 const SCRIPT_HELP: &str = r#"usage: designcraft-cli script [FILE|-] [--in FILE | --sample] [--connect PORT] [--save OUT] [--export OUT] [--keep-going]
@@ -124,7 +124,7 @@ fn main() -> ExitCode {
         Some("bench") => report(perf::bench(&args[1..])),
         Some("validate-pdf") => report(validate_pdf(args.get(1).map(String::as_str))),
         Some("links") => {
-            use designcraft_engine::links::*;
+            use designcraft_engine::links::{APP_PAGE, DISCORD, GITHUB, ISSUES, WEBSITE};
             outln!("Discord   {DISCORD}\nWebsite   {WEBSITE}\nApp page  {APP_PAGE}\nGitHub    {GITHUB}\nIssues    {ISSUES}");
             ExitCode::SUCCESS
         }
@@ -263,7 +263,7 @@ impl Export {
     /// A name with another extension is an error: it used to get a PNG of the page. One with no
     /// extension still does (`--export /dev/stdout`).
     fn of(out: &str) -> Result<Self, String> {
-        let ext = std::path::Path::new(out).extension().and_then(|e| e.to_str()).map(str::to_lowercase);
+        let ext = std::path::Path::new(out).extension().and_then(std::ffi::OsStr::to_str).map(str::to_lowercase);
         Ok(match ext.as_deref() {
             None | Some("png" | "jpg" | "jpeg") => Export::Image,
             Some("pdf") => Export::Pdf,
@@ -345,33 +345,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             "--export" => {
                 let out = val()?;
-                match Export::of(&out)? {
-                    Export::Image => export(&mut s, &out, page, scale)?,
-                    Export::Pdf => {
-                        let mut p = pdf_opts.clone();
-                        p["path"] = json!(out);
-                        let r = s.execute("file.exportPdf", &p).map_err(|e| e.to_string())?;
-                        eprintln!("wrote {out} ({} pages, {} bytes)", r["pages"], r["bytes"]);
-                        for w in r["warnings"].as_array().into_iter().flatten() {
-                            eprintln!("warning: {}", w.as_str().unwrap_or_default());
-                        }
-                    }
-                    Export::Document => {
-                        s.execute("file.saveAs", &json!({"path": out})).map_err(|e| e.to_string())?;
-                        eprintln!("saved {out}");
-                    }
-                    Export::Pptx => {
-                        let r = s.execute("file.exportPptx", &json!({"path": out})).map_err(|e| e.to_string())?;
-                        eprintln!("wrote {out} ({} slides, {} bytes)", r["slides"], r["bytes"]);
-                        for w in r["warnings"].as_array().into_iter().flatten() {
-                            eprintln!("warning: {}", w.as_str().unwrap_or_default());
-                        }
-                    }
-                    Export::Command(cmd) => {
-                        let r = s.execute(cmd, &json!({"path": out})).map_err(|e| e.to_string())?;
-                        eprintln!("wrote {out} ({} bytes)", r["bytes"]);
-                    }
-                }
+                handle_export(&mut s, &out, page, scale, &pdf_opts)?;
             }
             "--all-pages" => {
                 let dir = val()?;
@@ -382,6 +356,37 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
             }
             other => return Err(format!("unknown option {other}")),
+        }
+    }
+    Ok(())
+}
+
+fn handle_export(s: &mut Session, out: &str, page: usize, scale: f64, pdf_opts: &Value) -> Result<(), String> {
+    match Export::of(out)? {
+        Export::Image => export(s, out, page, scale)?,
+        Export::Pdf => {
+            let mut p = pdf_opts.clone();
+            p["path"] = json!(out);
+            let r = s.execute("file.exportPdf", &p).map_err(|e| e.to_string())?;
+            eprintln!("wrote {out} ({} pages, {} bytes)", r["pages"], r["bytes"]);
+            for w in r["warnings"].as_array().into_iter().flatten() {
+                eprintln!("warning: {}", w.as_str().unwrap_or_default());
+            }
+        }
+        Export::Document => {
+            s.execute("file.saveAs", &json!({"path": out})).map_err(|e| e.to_string())?;
+            eprintln!("saved {out}");
+        }
+        Export::Pptx => {
+            let r = s.execute("file.exportPptx", &json!({"path": out})).map_err(|e| e.to_string())?;
+            eprintln!("wrote {out} ({} slides, {} bytes)", r["slides"], r["bytes"]);
+            for w in r["warnings"].as_array().into_iter().flatten() {
+                eprintln!("warning: {}", w.as_str().unwrap_or_default());
+            }
+        }
+        Export::Command(cmd) => {
+            let r = s.execute(cmd, &json!({"path": out})).map_err(|e| e.to_string())?;
+            eprintln!("wrote {out} ({} bytes)", r["bytes"]);
         }
     }
     Ok(())

@@ -134,6 +134,25 @@ pub fn export_pdf_with_report(doc: &Document, cache: &Cache, opts: &PdfOptions) 
     write::guard(|| export_pdf_with_report_inner(doc, cache, opts))
 }
 
+/// Form fields (Buttons and Forms) and, for interactive PDF, video and sound; not in PDF/X
+/// or PDF/A: this update comes after krilla's validator ran, and its NeedAppearances fields and
+/// Screen annotations aren't allowed in PDF/A.
+fn add_form_fields(bytes: &mut Vec<u8>, warnings: &mut Vec<String>, doc: &Document, sheets: &[Sheet], opts: &PdfOptions) {
+    let fields = crate::forms::collect(doc, sheets);
+    let media = if opts.media { crate::forms::collect_media(doc, sheets) } else { Vec::new() };
+    if fields.is_empty() && media.is_empty() {
+        return;
+    }
+    match opts.standard {
+        Standard::PdfX4 => warnings.push("PDF/X-4: form fields and media were left out".into()),
+        Standard::PdfA2b => warnings.push("PDF/A-2b: form fields and media were left out".into()),
+        _ => match crate::forms::add_fields(&*bytes, &fields, &media) {
+            Some(b) => *bytes = b,
+            None => warnings.push("form fields and media couldn't be added to this PDF".into()),
+        },
+    }
+}
+
 fn export_pdf_with_report_inner(doc: &Document, cache: &Cache, opts: &PdfOptions) -> Result<ExportReport> {
     let sheets = sheets(doc, opts)?;
     let warnings = Vec::new();
@@ -235,23 +254,7 @@ fn export_pdf_with_report_inner(doc: &Document, cache: &Cache, opts: &PdfOptions
         // group that got past it, with its page.
         crate::pdfx::cmyk_group_spaces(&mut bytes);
     }
-    // Form fields (Buttons and Forms) and, for interactive PDF, video and sound; not in PDF/X
-    // or PDF/A: this update comes after krilla's validator ran, and its NeedAppearances fields and
-    // Screen annotations aren't allowed in PDF/A.
-    let fields = crate::forms::collect(doc, &sheets);
-    let media = if opts.media { crate::forms::collect_media(doc, &sheets) } else { Vec::new() };
-    if !fields.is_empty() || !media.is_empty() {
-        if opts.standard == Standard::PdfX4 {
-            warnings.push("PDF/X-4: form fields and media were left out".into());
-        } else if opts.standard == Standard::PdfA2b {
-            warnings.push("PDF/A-2b: form fields and media were left out".into());
-        } else {
-            match crate::forms::add_fields(&bytes, &fields, &media) {
-                Some(b) => bytes = b,
-                None => warnings.push("form fields and media couldn't be added to this PDF".into()),
-            }
-        }
-    }
+    add_form_fields(&mut bytes, &mut warnings, doc, &sheets, opts);
     if opts.standard == Standard::PdfX4 {
         // Output intent and PDF/X identification, then check the result.
         match crate::pdfx::make_pdfx4(&bytes, &title, created) {
@@ -654,6 +657,27 @@ impl Exporter<'_> {
         self.doc.resolve_color(name, tint).map(|c| device(&c, self.rgb_only))
     }
 
+    /// The parent pages' items on `layer` shown on page `pi` of spread `si`: the parent's bases
+    /// first, then the parent.
+    fn parent_items(&mut self, s: &mut Surface, si: usize, pi: usize, page: &designcraft_doc::Page, layer: &designcraft_doc::Layer, first: usize) {
+        let doc = self.doc;
+        for (ppi, ppage) in doc.shown_parent_pages(SpreadRef::Doc(si), pi) {
+            let Some(parent) = doc.parents.get(ppi) else { continue };
+            let Some(ppg) = parent.pages.get(ppage) else { continue };
+            let dx = page.x - ppg.x;
+            for it in &parent.items {
+                if it.layer != layer.id || page.overridden.contains(&it.id) {
+                    continue;
+                }
+                // Parent items belong to the parent page they sit on.
+                if parent.page_at_x(it.bounds().center().x) != Some(ppage) && parent.pages.len() > 1 {
+                    continue;
+                }
+                self.top_item(s, it, Affine::translate((dx, 0.0)), Some(first + pi), true);
+            }
+        }
+    }
+
     fn spread(&mut self, s: &mut Surface, si: usize) {
         let doc = self.doc;
         let Some(sp) = doc.spreads.get(si) else { return };
@@ -663,24 +687,8 @@ impl Exporter<'_> {
                 continue;
             }
             for (pi, page) in sp.pages.iter().enumerate() {
-                if !page.show_parent_items {
-                    continue;
-                }
-                // The parent's bases first, then the parent.
-                for (ppi, ppage) in doc.shown_parent_pages(SpreadRef::Doc(si), pi) {
-                    let Some(parent) = doc.parents.get(ppi) else { continue };
-                    let Some(ppg) = parent.pages.get(ppage) else { continue };
-                    let dx = page.x - ppg.x;
-                    for it in &parent.items {
-                        if it.layer != layer.id || page.overridden.contains(&it.id) {
-                            continue;
-                        }
-                        // Parent items belong to the parent page they sit on.
-                        if parent.page_at_x(it.bounds().center().x) != Some(ppage) && parent.pages.len() > 1 {
-                            continue;
-                        }
-                        self.top_item(s, it, Affine::translate((dx, 0.0)), Some(first + pi), true);
-                    }
+                if page.show_parent_items {
+                    self.parent_items(s, si, pi, page, layer, first);
                 }
             }
             for it in &sp.items {
@@ -1629,6 +1637,21 @@ fn is_rgb_icc(icc: &[u8]) -> bool {
     icc.get(16..20) == Some(b"RGB ".as_slice())
 }
 
+/// Whether an ICC profile describes grey.
+fn is_grey_icc(icc: &[u8]) -> bool {
+    icc.get(16..20) == Some(b"GRAY".as_slice())
+}
+
+/// Whether `data` decodes to grey (with or without alpha), read from its header.
+fn is_grey(data: &[u8]) -> bool {
+    use image::ImageDecoder;
+    image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_decoder().ok())
+        .is_some_and(|dec| !dec.color_type().has_color())
+}
+
 /// A JPEG, passed through. With `tag_rgb`, a JPEG keeps its own profile, and one without gets
 /// sRGB. krilla uses a profile only when its channels match the JPEG's, so a grey or CMYK JPEG
 /// without a profile stays DeviceGray or DeviceCMYK.
@@ -1668,6 +1691,10 @@ fn lossless(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMo
         _ => None,
     };
     direct.or_else(|| {
+        // A grey TIFF, BMP… stays DeviceGray, as a grey PNG or JPEG does (#1426).
+        if let Some(grey) = GreyImage::new(data) {
+            return Image::from_custom(grey, i).ok();
+        }
         // TIFF, BMP, PSD composites… and, with `tag_rgb`, untagged RGB.
         if mode.tag_rgb {
             return SrgbImage::new(rgba).and_then(|img| Image::from_custom(img, i).ok());
@@ -1722,6 +1749,61 @@ impl krilla::image::CustomImage for SrgbImage {
     }
 }
 
+/// A grey raster as a DeviceGray image (ICCBased when the file has a grey profile of its own), so
+/// a page that only holds black prints as black, not as RGB.
+#[derive(Clone, Hash)]
+struct GreyImage {
+    grey: Arc<Vec<u8>>,
+    /// Only when some pixel is not opaque.
+    alpha: Option<Arc<Vec<u8>>>,
+    size: (u32, u32),
+    icc: Option<Arc<Vec<u8>>>,
+}
+
+impl GreyImage {
+    /// `None` when `data` isn't grey or can't be decoded.
+    fn new(data: &[u8]) -> Option<Self> {
+        if !is_grey(data) {
+            return None;
+        }
+        let img = image::load_from_memory(data).ok()?.to_luma_alpha8();
+        let size = img.dimensions();
+        let pixels = usize::try_from(size.0).ok()?.checked_mul(usize::try_from(size.1).ok()?)?;
+        if pixels == 0 {
+            return None;
+        }
+        let (mut grey, mut alpha) = (Vec::with_capacity(pixels), Vec::with_capacity(pixels));
+        for p in img.pixels() {
+            grey.push(p.0[0]);
+            alpha.push(p.0[1]);
+        }
+        let alpha = alpha.iter().any(|a| *a < 255).then(|| Arc::new(alpha));
+        let icc = embedded_icc(data).filter(|p| is_grey_icc(p)).map(Arc::new);
+        Some(Self { grey: Arc::new(grey), alpha, size, icc })
+    }
+}
+
+impl krilla::image::CustomImage for GreyImage {
+    fn color_channel(&self) -> &[u8] {
+        &self.grey
+    }
+    fn alpha_channel(&self) -> Option<&[u8]> {
+        self.alpha.as_deref().map(Vec::as_slice)
+    }
+    fn bits_per_component(&self) -> krilla::image::BitsPerComponent {
+        krilla::image::BitsPerComponent::Eight
+    }
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+    fn icc_profile(&self) -> Option<&[u8]> {
+        self.icc.as_deref().map(Vec::as_slice)
+    }
+    fn color_space(&self) -> krilla::image::ImageColorspace {
+        krilla::image::ImageColorspace::Luma
+    }
+}
+
 /// A CMYK raster as a krilla image: its samples are written unchanged as DeviceCMYK, like a
 /// CMYK JPEG's. An embedded ICC profile is left out, as it is for JPEGs: the inks are meant for
 /// the output intent's press, and tagging them with another CMYK profile would let a RIP
@@ -1768,11 +1850,18 @@ fn recompress(data: &[u8], mode: RasterMode) -> Option<Image> {
     if img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p[3] < 255) {
         return None;
     }
-    let rgb = img.to_rgb8();
     let mut buf = Vec::new();
     let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
-    image::ImageEncoder::write_image(enc, rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).ok()?;
-    jpeg(buf.into(), || embedded_icc(data).filter(|p| is_rgb_icc(p)), mode)
+    // A grey image stays a grey JPEG (#1426).
+    let grey = !img.color().has_color();
+    if grey {
+        let l = img.to_luma8();
+        image::ImageEncoder::write_image(enc, l.as_raw(), l.width(), l.height(), image::ExtendedColorType::L8).ok()?;
+    } else {
+        let rgb = img.to_rgb8();
+        image::ImageEncoder::write_image(enc, rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).ok()?;
+    }
+    jpeg(buf.into(), || embedded_icc(data).filter(|p| if grey { is_grey_icc(p) } else { is_rgb_icc(p) }), mode)
 }
 
 #[cfg(test)]

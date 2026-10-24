@@ -1502,11 +1502,28 @@ fn ruby_cmd(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// A character fill must name a swatch of the document.
 pub(crate) fn validate_char_fill(document: &designcraft_doc::Document, attrs: &CharAttrs, command_id: &str) -> Result<()> {
+    validate_char_size(attrs, command_id)?;
     match &attrs.fill {
         Some(fill) => super::object::known_swatch(document, fill, command_id, "fill"),
         None => Ok(()),
     }
 }
+
+/// Type size is 0.1 to 1296 pt, the range this engine already applies to a ruby annotation's
+/// size. Nothing checked it for ordinary text, so `{"size": 0}` set type with no size, a negative
+/// size was accepted as well, and 1e9 pt asked the composer for a line a million times the page.
+pub(crate) fn validate_char_size(attrs: &CharAttrs, command_id: &str) -> Result<()> {
+    match attrs.size {
+        Some(size) if !(MIN_TYPE_SIZE..=MAX_TYPE_SIZE).contains(&size) => {
+            Err(bad(command_id, format!("size {size}: {MIN_TYPE_SIZE} to {MAX_TYPE_SIZE} pt")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Type size limits (InDesign's, and the ones `type.ruby` already uses).
+pub(crate) const MIN_TYPE_SIZE: f64 = 0.1;
+pub(crate) const MAX_TYPE_SIZE: f64 = 1296.0;
 
 /// Byte `pos` is the hidden paragraph mark of an *empty* paragraph: the only character on that
 /// line, and so the one a line-affecting attribute like leading can land on right away instead of
@@ -2088,7 +2105,7 @@ fn open_type_features(s: &mut Session, _p: &Value) -> Result<Value> {
             continue;
         }
         let names: std::collections::BTreeSet<&String> = fonts.values().filter_map(|f| f.stylistic_sets.get(&set)).collect();
-        let name = if names.len() == 1 { names.first().map(|n| n.to_string()) } else { None };
+        let name = if names.len() == 1 { names.first().map(ToString::to_string) } else { None };
         let (applied, available) = measure(&tag);
         sets.push(json!({"set": set, "tag": tag, "name": name, "applied": applied, "available": available}));
     }
@@ -3909,5 +3926,44 @@ mod pick_up_format_tests {
         let rect = s.execute("frame.create", &json!({"rect": [500, 500, 520, 520]})).unwrap()["id"].as_u64().unwrap();
         assert!(s.execute("type.pickUpFormat", &json!({"frame": rect, "point": [510, 510]})).is_err());
         let _ = ItemId(rect);
+    }
+}
+
+#[cfg(test)]
+mod size_bounds_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// Type size was not checked anywhere: `{"size": 0}` set type with no size at all, a negative
+    /// size was accepted the same way, and 1e9 pt asked the composer for a line a million times
+    /// the height of the page. The range is the one `type.ruby` already applies, 0.1 to 1296 pt.
+    #[test]
+    fn a_type_size_outside_the_range_is_refused() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"pages": 1})).unwrap();
+        let f = s.execute("frame.create", &json!({"rect": [20, 20, 400, 300], "content": "text", "text": "Hello world"})).unwrap();
+        let select = |s: &mut Session| {
+            s.execute("text.select", &json!({"story": f["story"].clone(), "anchor": 0, "focus": 5})).unwrap();
+        };
+        for size in [0.0, -12.0, 0.05, 1297.0, 1e9] {
+            select(&mut s);
+            let e = s.execute("type.char", &json!({"size": size})).expect_err("refused").to_string();
+            assert!(e.contains("0.1 to 1296 pt"), "{size}: {e}");
+        }
+        // The sizes in range still apply, including the ends.
+        for size in [0.1, 12.0, 1296.0] {
+            select(&mut s);
+            s.execute("type.char", &json!({"size": size})).unwrap_or_else(|e| panic!("{size}: {e}"));
+            assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["size"].as_f64(), Some(size));
+        }
+        // And the styles that carry character attributes are checked the same way.
+        for (command, params) in [
+            ("style.character.create", json!({"name": "Tiny", "chars": {"size": 0}})),
+            ("style.paragraph.create", json!({"name": "Huge", "chars": {"size": 2000}})),
+        ] {
+            let e = s.execute(command, &params).expect_err("refused").to_string();
+            assert!(e.contains("0.1 to 1296 pt"), "{command}: {e}");
+        }
     }
 }
