@@ -331,8 +331,9 @@ fn object_rows(
                 // Its own name, or the label it shows without the brackets.
                 let current = if it.name.is_empty() { name.trim_start_matches('<').trim_end_matches('>').to_string() } else { it.name.clone() };
                 start_rename(ui, it.id.0, &current);
-            } else if !ls.layer_closed {
-                // Objects on a locked or hidden layer can't be selected (they couldn't be edited).
+            } else if !ls.layer_closed && !it.locked {
+                // Locked objects, and objects on a locked or hidden layer, can't be selected (they
+                // couldn't be edited).
                 cmds.push(("selection.set", json!({"ids": [it.id.0], "add": add})));
             }
         }
@@ -753,6 +754,21 @@ mod tests {
         h.run_steps(2);
         click(&mut h, row(0, 0.5, true));
         assert_eq!(selected(&h), [ItemId(a)]);
+    }
+
+    /// A locked object's row selects nothing either.
+    #[test]
+    fn a_locked_objects_row_selects_nothing() {
+        let mut app = app();
+        let a = app.run("frame.create", json!({"rect": [0, 0, 10, 10]})).unwrap()["id"].as_u64().unwrap();
+        app.run("object.lock", json!({"ids": [a]})).unwrap();
+        app.run("selection.set", json!({"ids": []})).unwrap();
+        let mut h = panel(app);
+        if egui_kittest::kittest::Queryable::query_by_label(&h, "<rectangle>").is_none() {
+            click(&mut h, pos2(8.0 + 2.0 * COL_W + 9.0, row(0, 0.5, false).y));
+        }
+        click(&mut h, row(1, 0.5, false));
+        assert!(h.state().session.active().unwrap().selection.items.is_empty());
     }
 
     #[test]
