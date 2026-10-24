@@ -246,6 +246,16 @@ impl ToolContext<'_> {
         self.doc.hit_item(si, sp, self.tol(4.0)).map(|id| (sr, id))
     }
 
+    /// The frontmost object under `p` that can be selected: locked objects are passed over, as
+    /// with "Prevent Selection of Locked Objects", and a click reaches what is behind them.
+    pub fn hit_unlocked(&self, p: Point) -> Option<(SpreadRef, ItemId)> {
+        let (sr, sp) = self.layout.spread_at(p)?;
+        let SpreadRef::Doc(si) = sr else {
+            return self.hit_parent(sr, sp);
+        };
+        self.doc.hit_item_where(si, sp, self.tol(4.0), |it| !it.locked).map(|id| (sr, id))
+    }
+
     /// The frontmost text frame under `p`, looking inside groups. [`Self::hit`] stops at the
     /// group, so a loaded text cursor over a text frame in a group found nothing to thread into
     /// (gaps 27); InDesign threads into it.
