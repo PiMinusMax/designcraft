@@ -597,14 +597,26 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let opaque = bool_or(p, "opaque", false);
-                let ids = targets(s, p)?;
+                // What would change: unlocked objects (locked ones keep their effects, as with
+                // `object.effects`) with effects, or with transparency when `opaque`. Nothing to
+                // change makes no undo step.
+                let ids: Vec<_> = {
+                    let d = &s.doc()?.doc;
+                    targets(s, p)?
+                        .into_iter()
+                        .filter(|id| {
+                            d.item(*id).is_some_and(|it| {
+                                unlocked(d, it) && (it.effects.any() || (opaque && (it.opacity != 1.0 || it.blend != Default::default())))
+                            })
+                        })
+                        .collect()
+                };
+                if ids.is_empty() {
+                    return Ok(json!({"changed": 0}));
+                }
                 s.edit(|d, _| {
                     let mut changed = 0;
                     for id in &ids {
-                        // Locked objects keep their effects, as with `object.effects`.
-                        if !d.item(*id).is_some_and(|it| unlocked(d, it)) {
-                            continue;
-                        }
                         let Some(it) = d.item_mut(*id) else { continue };
                         it.effects = Default::default();
                         if opaque {
@@ -5645,6 +5657,15 @@ mod clear_effects_tests {
 
     #[test]
     fn clear_effects_removes_them_and_opaque_resets_transparency() {
+        // An object with nothing to clear: no change, no undo step.
+        {
+            let mut s = crate::Session::new();
+            s.execute("file.new", &json!({})).unwrap();
+            let id = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+            let undo = s.doc().unwrap().history.undo.len();
+            assert_eq!(s.execute("object.clearEffects", &json!({"ids": [id], "opaque": true})).unwrap()["changed"], 0);
+            assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+        }
         let mut s = crate::Session::new();
         s.execute("file.new", &json!({})).unwrap();
         let id = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
@@ -5663,8 +5684,10 @@ mod clear_effects_tests {
         // A locked object named by `ids` keeps its effects and transparency.
         s.execute("object.effects", &json!({"ids": [id], "effects": {"feather": 4}})).unwrap();
         s.execute("object.lock", &json!({"ids": [id]})).unwrap();
+        let undo = s.doc().unwrap().history.undo.len();
         let r = s.execute("object.clearEffects", &json!({"ids": [id], "opaque": true})).unwrap();
         assert_eq!(r["changed"], 0);
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo, "nothing changed: no undo step");
         let it = item(&s);
         assert!(it.effects.any());
         assert_eq!((it.opacity, it.blend), (0.5, designcraft_color::BlendMode::Multiply));
