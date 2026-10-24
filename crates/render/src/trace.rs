@@ -1,4 +1,4 @@
-//! Local profiling aid (not for upstream): `DESIGNCRAFT_TRACE=1` times what the app does and
+//! Local profiling aid (not for upstream), on unless `DESIGNCRAFT_TRACE=0`: times what the app does and
 //! writes it to the log (`designcraft.log`, target `designcraft_render::trace`).
 //!
 //! - Spans: `let _s = trace::span(20.0, || format!("…"));` logs the span when it takes longer
@@ -67,7 +67,8 @@ pub fn enabled() -> bool {
 
 /// Turn tracing on when `DESIGNCRAFT_TRACE` is set (and not `0`), and start the watchdog.
 pub fn init() {
-    let on = std::env::var("DESIGNCRAFT_TRACE").is_ok_and(|v| !v.is_empty() && v != "0");
+    // This local build traces unless told not to (`DESIGNCRAFT_TRACE=0`).
+    let on = std::env::var("DESIGNCRAFT_TRACE").map_or(true, |v| v != "0");
     if !on || ON.swap(true, Ordering::Relaxed) {
         return;
     }
