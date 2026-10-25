@@ -933,9 +933,10 @@ fn qr_section(app: &mut DesignApp, ui: &mut Ui, parts: designcraft_engine::cmd::
         let chip = sub(b, 4.0, 2.0, 17.0, 17.0);
         widgets::paint_chip(ui.painter(), chip, c, g);
         ui.painter().rect_stroke(chip, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
-        let resp =
-            ui.interact(chip, ui.id().with(("qrchip", label)), Sense::click()).on_hover_text(format!("{}: {cur}", crate::i18n::tr(&lang, label)));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("QR {label} swatch")));
+        let resp = ui
+            .interact(chip, ui.scope_id().with(("qrchip", label)), Sense::click())
+            .on_hover_text(format!("{}: {cur}", crate::i18n::tr(&lang, label)));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("QR {label} swatch")));
         let mut picked = None;
         egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             picked = super::swatch_list(ui, &doc, &cur);
