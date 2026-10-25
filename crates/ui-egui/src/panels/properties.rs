@@ -2837,6 +2837,26 @@ pub fn info_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     );
 }
 
+/// The Effects panel's add-effect button: "fx" at text size with a menu triangle (the icon's "fx",
+/// drawn inside a 20 pt button, came out at 7–8 px).
+fn fx_menu_button(ui: &mut egui::Ui, tip: &str) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (r, resp) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::click());
+    if resp.hovered() || resp.is_pointer_button_down_on() {
+        ui.painter().rect_filled(r, 3.0, t.hover);
+    }
+    let galley = ui.painter().layout_no_wrap("fx".into(), egui::FontId::proportional(15.0), t.icon);
+    ui.painter().galley(pos2(r.min.x + 5.0, r.center().y - galley.size().y / 2.0), galley, t.icon);
+    let c = r.center().y;
+    let tri = vec![pos2(r.max.x - 11.0, c - 1.5), pos2(r.max.x - 4.0, c - 1.5), pos2(r.max.x - 7.5, c + 2.5)];
+    ui.painter().add(egui::Shape::convex_polygon(tri, t.icon, Stroke::NONE));
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "fx"));
+    resp.on_hover_ui(|ui| {
+        crate::rtl::label(ui, tip);
+    })
+}
+
 pub fn effects_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     let Some(st) = app.session.active() else { return };
     let Some(it) = st.selection.items.first().and_then(|i| st.doc.item(*i)).cloned() else {
@@ -2930,7 +2950,7 @@ pub fn effects_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         if icons::button(ui, "trash", 20.0, false, crate::i18n::tr(&app.ui.language, "Remove effects from the selected target")).clicked() {
             let _ = app.run("object.clearEffects", json!({}));
         }
-        fx = Some(icons::button(ui, "fx", 20.0, false, crate::i18n::tr(&app.ui.language, "Add an object effect to the selected target")));
+        fx = Some(fx_menu_button(ui, crate::i18n::tr(&app.ui.language, "Add an object effect to the selected target")));
         if icons::button(ui, "none", 20.0, false, crate::i18n::tr(&app.ui.language, "Clear all effects and make object opaque")).clicked() {
             let _ = app.run("object.clearEffects", json!({"opaque": true}));
         }
