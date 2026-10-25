@@ -2820,7 +2820,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         app.session.recovery_dir = Some(directory.path().to_path_buf());
         app.last_recovery = -1e9;
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.logic(ui.ctx()));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.ui_frame_end(ui.ctx()));
         out.textures_delta.clear();
         assert!(app.recovery_job.is_some(), "the save runs on a thread");
         // An idle app asks for a frame while the save runs, so it is recorded without input.
@@ -2843,7 +2843,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         app.session.recovery_dir = Some(directory.path().to_path_buf());
         app.last_recovery = -1e9;
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.logic(ui.ctx()));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.ui_frame_end(ui.ctx()));
         out.textures_delta.clear();
         assert!(app.recovery_job.is_some());
         app.run("frame.create", json!({"rect": [10, 10, 50, 50]})).unwrap();
