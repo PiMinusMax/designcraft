@@ -1384,6 +1384,14 @@ fn deselect_on_layers(d: &designcraft_doc::Document, sel: &mut designcraft_doc::
     if sel.items.is_empty() {
         sel.content = false;
     }
+    // A caret or text, or table cells, in a frame on those layers: typing would still edit it.
+    let story_there = |sid: designcraft_doc::StoryId| d.story(sid).is_some_and(|st| st.frames.iter().any(|f| on_layer.contains(f)));
+    if sel.text.is_some_and(|t| t.frame.map_or_else(|| story_there(t.story), |f| on_layer.contains(&f))) {
+        sel.text = None;
+    }
+    if sel.cells.as_ref().is_some_and(|c| story_there(c.story)) {
+        sel.cells = None;
+    }
 }
 
 #[cfg(test)]
@@ -2179,6 +2187,32 @@ mod layer_options_tests {
         s.execute("selection.set", &json!({"ids": [b]})).unwrap();
         s.execute("object.lock", &json!({})).unwrap();
         assert!(sel(&s).is_empty(), "Object › Lock deselects");
+    }
+
+    /// Locking or hiding a layer ends a caret or text selection in a text frame on it, so typing
+    /// no longer edits its story; Lock Others the same for the other layers.
+    #[test]
+    fn locking_or_hiding_a_layer_ends_typing_in_its_text_frames() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let layer = s.doc().unwrap().doc.layers[0].id.0;
+        let f = s.execute("frame.create", &json!({"rect": [0, 0, 200, 100], "content": "text", "text": "Hello"})).unwrap();
+        let caret = |s: &mut crate::Session| {
+            s.execute("text.select", &json!({"story": f["story"], "anchor": 2, "focus": 2})).unwrap();
+            assert!(s.doc().unwrap().selection.text.is_some());
+        };
+        for change in [json!({"id": layer, "locked": true}), json!({"id": layer, "visible": false})] {
+            s.execute("layer.set", &json!({"id": layer, "locked": false, "visible": true})).unwrap();
+            caret(&mut s);
+            s.execute("layer.set", &change).unwrap();
+            assert!(s.doc().unwrap().selection.text.is_none(), "{change}: the caret is gone");
+            assert!(s.execute("text.insert", &json!({"text": "x"})).is_err(), "{change}: nothing to type into");
+        }
+        s.execute("layer.set", &json!({"id": layer, "locked": false, "visible": true})).unwrap();
+        let other = s.execute("layer.new", &json!({"name": "Art"})).unwrap()["id"].as_u64().unwrap();
+        caret(&mut s);
+        s.execute("layer.others", &json!({"id": other, "lock": true})).unwrap();
+        assert!(s.doc().unwrap().selection.text.is_none(), "Lock Others ends the caret on the first layer");
     }
 }
 
