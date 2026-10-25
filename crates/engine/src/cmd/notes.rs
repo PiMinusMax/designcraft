@@ -221,4 +221,15 @@ mod tests {
         // Caret is now in footnote text: no nested footnotes.
         assert!(s.execute("footnote.insert", &json!({})).is_err());
     }
+
+    #[test]
+    fn huge_start_at_does_not_overflow() {
+        let (mut s, sid) = session_with_text();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 16, "focus": 16})).unwrap();
+        s.execute("footnote.insert", &json!({"text": "x"})).unwrap();
+        s.execute("footnote.options", &json!({"startAt": 4294967295u32})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        let cs = s.cache.get(&d, sid, None);
+        assert_eq!(cs.frames[0].notes.len(), 1);
+    }
 }

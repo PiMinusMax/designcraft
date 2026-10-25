@@ -186,8 +186,8 @@ fn run_attrs(rpr: Option<&El>) -> CharAttrs {
     if let Some(s) = r.on("strike") {
         a.strikethrough = Some(s);
     }
-    // Half-points; sizes outside the engine's 0.1–1296 pt range (or non-finite) are dropped.
-    if let Some(pt) = r.val("sz").and_then(|v| v.parse::<f64>().ok()).map(|sz| sz / 2.0).filter(|pt| (0.1..=1296.0).contains(pt)) {
+    // Half-points; a size the engine cannot mean is dropped (#1593).
+    if let Some(pt) = r.val("sz").and_then(|v| v.parse::<f64>().ok()).map(|sz| sz / 2.0).and_then(designcraft_doc::attrs::imported_type_size) {
         a.size = Some(pt);
     }
     if let Some(f) = r.child("rFonts").and_then(|f| f.attr("ascii").or(f.attr("hAnsi"))) {
@@ -210,7 +210,8 @@ fn run_attrs(rpr: Option<&El>) -> CharAttrs {
 fn para_attrs(ppr: Option<&El>) -> ParaAttrs {
     let mut a = ParaAttrs::default();
     let Some(p) = ppr else { return a };
-    let tw = |v: Option<&str>| v.and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).map(|v| v / 20.0);
+    // Twips, clamped: a file can hold 1e300, which became a 5e298 pt indent (#1593).
+    let tw = |v: Option<&str>| v.and_then(|v| v.parse::<f64>().ok()).map(|v| v / 20.0).and_then(designcraft_doc::attrs::imported_measure);
     if let Some(sp) = p.child("spacing") {
         a.space_before = tw(sp.attr("before"));
         a.space_after = tw(sp.attr("after"));
@@ -631,6 +632,29 @@ mod tests {
         // At or under the cap reads fine; a missing part is `None`.
         assert_eq!(part_capped(&mut zip, "word/document.xml", 64 * 1024).unwrap().map(|s| s.len()), Some(64 * 1024));
         assert_eq!(part_capped(&mut zip, "word/missing.xml", 4096).unwrap(), None);
+    }
+
+    /// A DOCX can hold any number where a measure belongs: `1e300` twips became a 5e298 pt
+    /// indent, and `w:sz` of `1e300` a 5e299 pt type size. Measures are clamped to the widest
+    /// page and a size the engine cannot mean is dropped (#1593).
+    #[test]
+    fn a_measure_or_size_a_file_cannot_mean_is_bounded() {
+        use designcraft_doc::attrs::MAX_MEASURE;
+        let doc = format!(
+            r#"<w:document {W}><w:body><w:p><w:pPr>
+                 <w:spacing w:before="1e300" w:after="-1e300"/><w:ind w:left="1e300" w:firstLine="-1e300"/>
+               </w:pPr><w:r><w:rPr><w:sz w:val="1e300"/></w:rPr><w:t>big</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let i = import(&docx(&doc, "", "")).unwrap();
+        let p = &i.story.paras[0].para;
+        for (what, v) in
+            [("space before", p.space_before), ("space after", p.space_after), ("left indent", p.left_indent), ("first line", p.first_line_indent)]
+        {
+            let v = v.expect("the value is kept, bounded");
+            assert!(v.is_finite() && v.abs() <= MAX_MEASURE, "{what} is within the widest page: {v}");
+        }
+        let size = i.story.char_format_at(i.story.text.find("big").unwrap() + 1).over.size;
+        assert_eq!(size, None, "a size the engine cannot mean is dropped, so the style's size stands");
     }
 
     #[test]

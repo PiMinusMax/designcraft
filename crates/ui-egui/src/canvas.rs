@@ -238,14 +238,79 @@ pub fn current_parent_page(app: &DesignApp) -> Option<(usize, usize)> {
     Some((pi, qi))
 }
 
-/// Scroll so absolute page `abs` is centred (keeps zoom).
+/// Scroll so absolute page `abs` is centred (keeps zoom). A jump Go Back can return from.
 pub fn go_to_page(app: &mut DesignApp, abs: usize) {
+    note_jump(app, false);
+    centre_page(app, abs);
+    note_jump(app, true);
+}
+
+fn centre_page(app: &mut DesignApp, abs: usize) {
     let Some(st) = app.session.active() else { return };
     let layout = CanvasLayout::new(&st.doc, false);
     let Some(pr) = layout.page_rect(&st.doc, abs) else { return };
     let Some(rect) = app.canvas_rect else { return };
     if let Some(v) = app.view_mut() {
         v.origin = Point::new(pr.center().x - rect.width() as f64 / 2.0 / v.zoom, pr.center().y - rect.height() as f64 / 2.0 / v.zoom);
+    }
+}
+
+/// The document's pages by id, in page order.
+fn page_ids(doc: &Document) -> Vec<designcraft_doc::ids::PageId> {
+    doc.spreads.iter().flat_map(|s| s.pages.iter().map(|p| p.id)).collect()
+}
+
+/// The page in view and the view centre's offset from that page's centre. Parent pages have none,
+/// nor has a view still waiting to be fitted (leaving parent pages for a document page).
+pub(crate) fn page_in_view(app: &DesignApp) -> Option<(designcraft_doc::ids::PageId, DVec2)> {
+    let st = app.session.active().filter(|st| !st.editing_parents)?;
+    let (v, r) = (app.view().filter(|v| v.fitted)?, app.canvas_rect?);
+    let abs = current_page(app)?;
+    let id = st.doc.page(abs)?.id;
+    let pr = CanvasLayout::new(&st.doc, false).page_rect(&st.doc, abs)?;
+    let c = Point::new(v.origin.x + r.width() as f64 / 2.0 / v.zoom, v.origin.y + r.height() as f64 / 2.0 / v.zoom);
+    Some((id, c - pr.center()))
+}
+
+/// Layout ▸ Go Back / Go Forward record jumps (Go to Page, the page and spread commands, the Pages
+/// panel), not scrolling: where the view is when a jump starts, and where the jump took it.
+fn note_jump(app: &mut DesignApp, to: bool) {
+    let Some((id, offset)) = page_in_view(app) else { return };
+    if let Some(h) = app.page_history_mut() {
+        if to { h.visit(id, offset) } else { h.leave(id, offset) }
+    }
+}
+
+/// Whether Layout ▸ Go Back (`step` < 0) or Go Forward has a page to go to from the view as it is.
+pub fn can_go_through_history(app: &DesignApp, step: isize) -> bool {
+    let Some(st) = app.session.active().filter(|st| !st.editing_parents) else { return false };
+    // A view still waiting to be fitted is refitted next frame, which would replace the destination.
+    if !app.view().is_some_and(|v| v.fitted) {
+        return false;
+    }
+    let ids = page_ids(&st.doc);
+    let Some(mut h) = app.page_history().cloned() else { return false };
+    if let Some((id, offset)) = page_in_view(app) {
+        h.leave(id, offset);
+    }
+    h.can_go(step, |id| ids.contains(&id))
+}
+
+/// Layout ▸ Go Back (`step` < 0) or Go Forward: show the page viewed before or after this one, where
+/// the view was on it (zoom kept).
+pub fn go_through_history(app: &mut DesignApp, step: isize) {
+    if !app.view().is_some_and(|v| v.fitted) {
+        return;
+    }
+    note_jump(app, false);
+    let Some(ids) = app.session.active().filter(|st| !st.editing_parents).map(|st| page_ids(&st.doc)) else { return };
+    let Some((id, offset)) = app.page_history_mut().and_then(|h| h.go(step, |id| ids.contains(&id))) else { return };
+    let Some(st) = app.session.active() else { return };
+    let Some(pr) = ids.iter().position(|p| *p == id).and_then(|abs| CanvasLayout::new(&st.doc, false).page_rect(&st.doc, abs)) else { return };
+    let Some(rect) = app.canvas_rect else { return };
+    let c = pr.center() + offset;
+    if let Some(v) = app.view_mut() {
+        v.origin = Point::new(c.x - rect.width() as f64 / 2.0 / v.zoom, c.y - rect.height() as f64 / 2.0 / v.zoom);
     }
 }
 
@@ -268,10 +333,29 @@ fn present_fit(app: &mut DesignApp, rect: Rect) {
 /// Centre the spread `delta` spreads after (or before) the one in view (keeps zoom); stops at the
 /// first and last spread. Parent spreads while they are being edited.
 pub fn step_spread(app: &mut DesignApp, delta: isize) {
+    // At the first or last spread only the view moves, within the spread: no jump for Go Back.
+    let jump = spread_step(app, delta).is_some_and(|(cur, to)| cur != to);
+    if jump {
+        note_jump(app, false);
+    }
+    centre_spread(app, delta);
+    if jump {
+        note_jump(app, true);
+    }
+}
+
+/// The slot in view and the one `delta` spreads after (or before) it, stopping at the ends.
+fn spread_step(app: &DesignApp, delta: isize) -> Option<(usize, usize)> {
+    let st = app.session.active()?;
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let cur = current_slot(app, &layout)?;
+    Some((cur, cur.saturating_add_signed(delta).min(layout.slots.len().saturating_sub(1))))
+}
+
+fn centre_spread(app: &mut DesignApp, delta: isize) {
+    let Some((_, to)) = spread_step(app, delta) else { return };
     let Some(st) = app.session.active() else { return };
     let layout = CanvasLayout::new(&st.doc, st.editing_parents);
-    let Some(cur) = current_slot(app, &layout) else { return };
-    let to = cur.saturating_add_signed(delta).min(layout.slots.len().saturating_sub(1));
     let Some(b) = layout.slots.get(to).map(|s| s.bounds) else { return };
     let Some(rect) = app.canvas_rect else { return };
     if let Some(v) = app.view_mut() {

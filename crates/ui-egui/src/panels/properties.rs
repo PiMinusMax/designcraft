@@ -2089,9 +2089,10 @@ fn paragraph_panel_menu(app: &mut DesignApp, ui: &mut Ui, p: &Value) {
     if item(ui, "Balance Ragged Lines", Some(balance), true) {
         attrs = Some(json!({"balanceRagged": !balance}));
     }
-    let optical = p["opticalMargin"].as_bool().unwrap_or(false);
-    if item(ui, "Optical Margin Alignment", Some(optical), true) {
-        attrs = Some(json!({"opticalMargin": !optical}));
+    // Story-wide Optical Margin Alignment is in the Story panel.
+    let ignore = p["ignoreOpticalMargin"].as_bool().unwrap_or(false);
+    if item(ui, "Ignore Optical Margin", Some(ignore), true) {
+        attrs = Some(json!({"ignoreOpticalMargin": !ignore}));
     }
     ui.separator();
     for (label, id) in [
@@ -3218,6 +3219,7 @@ mod tests {
                 }),
             );
             doc.item_mut(id).unwrap().content = Content::Graphic(Graphic {
+                layer_options: None,
                 asset: aid,
                 size: (72.0, 72.0),
                 xf: designcraft_geom::Affine::IDENTITY,
@@ -3460,6 +3462,22 @@ mod tests {
         h.get_by_label("☰").click();
         h.run_steps(3);
         let _ = h.get_by_label("✓ Only Align First Line to Grid");
+    }
+
+    #[test]
+    fn paragraph_panel_menu_toggles_ignore_optical_margin() {
+        let mut h = panel_harness(text_app(), paragraph_panel);
+        h.run_steps(3);
+        h.get_by_label("☰").click();
+        h.run_steps(3);
+        h.get_by_label("   Ignore Optical Margin").click();
+        h.run_steps(3);
+        assert_eq!(text_attrs(h.state_mut()).unwrap()["para"]["ignoreOpticalMargin"], true);
+        h.get_by_label("☰").click();
+        h.run_steps(3);
+        h.get_by_label("✓ Ignore Optical Margin").click();
+        h.run_steps(3);
+        assert_eq!(text_attrs(h.state_mut()).unwrap()["para"]["ignoreOpticalMargin"], false);
     }
 
     #[test]

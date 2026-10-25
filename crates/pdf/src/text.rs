@@ -309,7 +309,7 @@ impl Exporter<'_> {
             if let Some(clip) = to_path(&c.clip.to_path(0.1)) {
                 s.push_clip_path(&clip, &krilla::paint::FillRule::NonZero);
                 s.push_transform(&tf(Affine::translate((c.clip.x0, c.clip.y0))));
-                self.graphic(s, g);
+                self.graphic(s, g, None);
                 s.pop();
                 s.pop();
             }

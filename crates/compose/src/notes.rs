@@ -130,7 +130,7 @@ impl Notes {
                 self.num = o.start_at;
             }
             self.numbers[k] = self.num;
-            self.num += 1;
+            self.num = self.num.saturating_add(1);
             sub.notes.insert(self.refs[k], o.label(self.numbers[k], false));
         }
         sub.note_position = o.ref_position;

@@ -583,8 +583,8 @@ mod tests {
             d.settings.lists.push(NumberedList { name: "Steps".into(), continue_across_stories: false });
             d.settings.lists.push(NumberedList { name: "Unused".into(), ..Default::default() });
             let st = d.styles_mut();
-            st.export_tags.insert("p:Head".into(), ExportTag { tag: "h1".into(), class: "title".into() });
-            st.export_tags.insert("c:Lead".into(), ExportTag { tag: "em".into(), class: String::new() });
+            st.export_tags.insert("p:Head".into(), ExportTag { tag: "h1".into(), class: "title".into(), split: true });
+            st.export_tags.insert("c:Lead".into(), ExportTag { tag: "em".into(), class: String::new(), ..Default::default() });
             st.para_mut("Quote").unwrap().para.list_name = Some("Steps".into());
             Ok(())
         })
@@ -592,7 +592,7 @@ mod tests {
         let mut s = doc_with_body_and_lead();
         s.execute("style.load", &json!({"base64": file_of(&src), "conflicts": "autoRename"})).unwrap();
         let d = &s.doc().unwrap().doc;
-        assert_eq!(d.styles.export_tag("Head", false).map(|t| t.tag.as_str()), Some("h1"));
+        assert_eq!(d.styles.export_tag("Head", false).map(|t| (t.tag.as_str(), t.split)), Some(("h1", true)), "Split Document comes along");
         assert_eq!(d.styles.export_tag("Lead 2", true).map(|t| t.tag.as_str()), Some("em"), "the tag follows the new name");
         assert_eq!(d.styles.export_tag("Lead", true), None);
         assert_eq!(d.settings.lists.iter().map(|l| (l.name.as_str(), l.continue_across_stories)).collect::<Vec<_>>(), [("Steps", false)]);

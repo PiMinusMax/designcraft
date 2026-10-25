@@ -201,7 +201,9 @@ pub fn import(bytes: &[u8]) -> Result<Imported, ImportError> {
                     }
                     "cFont" => fmt.over.font_family = (!value.is_empty()).then(|| value.to_string()),
                     "cTypeface" => fmt.over.font_style = (!value.is_empty()).then(|| value.to_string()),
-                    "cSize" => fmt.over.size = value.trim().parse().ok().filter(|s: &f64| s.is_finite()),
+                    // A size the engine cannot mean (0, negative, 1e300) is dropped, so the text
+                    // keeps its style's size (#1593).
+                    "cSize" => fmt.over.size = value.trim().parse().ok().and_then(designcraft_doc::attrs::imported_type_size),
                     "DefineParaStyle" | "DefineCharStyle" => {
                         let nm = value.split('=').next().unwrap_or("").trim().to_string();
                         let list = if name == "DefineParaStyle" { &mut para_styles } else { &mut char_styles };
@@ -274,6 +276,24 @@ mod tests {
         assert_eq!(back.story.text, i.story.text);
         // Half a pair is not a character: it is still left out.
         assert_eq!(import("<ASCII-WIN>\r\n<ParaStyle:Body>A<0xD83D>B<0xDE00>C".as_bytes()).unwrap().story.text, "ABC");
+    }
+
+    /// A size does not have to be non-finite to be nonsense: a file can hold `1e300`, `0` or a
+    /// negative, and tagged text took all three and set them on the text (#1593). They are now
+    /// dropped, as RTF and DOCX already dropped them, so the text keeps its style's size.
+    #[test]
+    fn a_char_size_the_engine_cannot_mean_is_dropped() {
+        for v in ["1e300", "-5", "0", "1297", "0.09"] {
+            let src = format!("<ASCII-WIN>\r\n<ParaStyle:Body><cSize:{v}>big<cSize:>");
+            let i = import(src.as_bytes()).unwrap();
+            let size = i.story.char_format_at(i.story.text.find("big").unwrap() + 1).over.size;
+            assert_eq!(size, None, "cSize {v} is not a size the engine can mean");
+        }
+        // A size inside the range still arrives.
+        let src = "<ASCII-WIN>\r\n<ParaStyle:Body><cSize:18>big<cSize:>";
+        let i = import(src.as_bytes()).unwrap();
+        let size = i.story.char_format_at(i.story.text.find("big").unwrap() + 1).over.size;
+        assert_eq!(size, Some(18.0));
     }
 
     /// `f64::from_str` accepts "NaN" and "inf"; a non-finite size must not reach the story.

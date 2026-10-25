@@ -1765,7 +1765,7 @@ fn table_style_fields(ts: &mut designcraft_doc::TableStyle, p: &Value, border: O
         ts.borders = Default::default();
     }
     if let Some(a) = p.get("altRows").and_then(Value::as_object) {
-        let n = |k: &str, d: u32| a.get(k).and_then(Value::as_u64).map_or(d, |v| v as u32);
+        let n = |k: &str, d: u32| a.get(k).and_then(Value::as_u64).map_or(d, |v| u32::try_from(v).unwrap_or(u32::MAX));
         let c = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or(designcraft_color::swatch::NONE).to_string();
         let t = |k: &str| a.get(k).and_then(Value::as_f64).map_or(1.0, |v| v.clamp(0.0, 1.0) as f32);
         ts.alt_rows = Some(designcraft_doc::AltFills {
@@ -2017,6 +2017,7 @@ fn place_graphic(s: &mut Session, p: &Value) -> Result<Value> {
         let t = st.table_mut(g.table).ok_or_else(|| bad(ID, "no table"))?;
         let cell = t.cell_mut(r, c).ok_or_else(|| bad(ID, format!("no cell {r},{c}")))?;
         cell.graphic = Some(designcraft_doc::Graphic {
+            layer_options: None,
             asset: aid,
             size: (nw, nh),
             xf,
@@ -2478,5 +2479,24 @@ mod resize_border_tests {
         assert_eq!(table(&s), before);
         s.execute("object.setFlags", &json!({"ids": [f], "locked": true})).unwrap();
         assert!(s.execute("table.resizeBorder", &json!({"frame": f, "table": t, "axis": "column", "index": 0, "delta": 5})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod style_alt_rows_tests {
+    use serde_json::json;
+
+    use super::table_style_fields;
+
+    #[test]
+    fn style_alt_rows_counts_saturate() {
+        let mut ts = designcraft_doc::TableStyle::default();
+        let p = json!({"altRows": {"first": 4294967297u64, "next": 4294967296u64, "skipFirst": 4294967295u64, "skipLast": 3}});
+        table_style_fields(&mut ts, &p, None);
+        let a = ts.alt_rows.unwrap();
+        assert_eq!(a.first, u32::MAX, "first");
+        assert_eq!(a.next, u32::MAX, "next");
+        assert_eq!(a.skip_first, u32::MAX, "skip_first");
+        assert_eq!(a.skip_last, 3, "skip_last");
     }
 }

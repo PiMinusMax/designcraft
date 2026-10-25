@@ -278,11 +278,13 @@ pub(crate) fn end_stale_preview(app: &mut DesignApp) {
     }
 }
 
-/// Drop the views (one per pane) of a preview document that has gone.
+/// Drop the views and page histories (one per pane) of a preview document that has gone.
 fn forget_view(app: &mut DesignApp, uid: Option<u64>) {
     if let Some(uid) = uid.filter(|uid| app.session.documents().iter().all(|d| d.uid != *uid)) {
         app.views.remove(&uid);
         app.views.remove(&(uid ^ (1 << 63)));
+        app.page_history.remove(&uid);
+        app.page_history.remove(&(uid ^ (1 << 63)));
     }
 }
 

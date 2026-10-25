@@ -35,6 +35,7 @@ mod marks;
 mod text;
 
 mod forms;
+mod optional_content;
 mod pdfx;
 mod transitions;
 pub use export::{BookletKind, BookletOptions, booklet_pairs, export_booklet, export_pdf, export_pdf_with_report, merge_pdfs, sheet_spreads};

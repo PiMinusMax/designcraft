@@ -20,6 +20,15 @@ const TOC_STYLE_ID: &str = "TOCStyle/Table of Contents";
 const TOC_STYLE_NAME: &str = "Table of Contents";
 const NO_CHAR_ID: &str = "CharacterStyle/$ID/[No character style]";
 
+// Retained IDML attributes have unprefixed ASCII names. Native JSON can be
+// edited independently: never let its map keys become XML syntax or Self IDs.
+fn graphic_layer_attribute_name(key: &str) -> bool {
+    !key.is_empty()
+        && key != "Self"
+        && key != "xmlns"
+        && key.bytes().enumerate().all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || (i > 0 && (b.is_ascii_digit() || matches!(b, b'.' | b'-'))))
+}
+
 /// Export options.
 #[derive(Clone, Debug)]
 pub struct ExportOptions {
@@ -778,6 +787,15 @@ impl<'a> Ex<'a> {
                 designcraft_doc::BlendSpace::Rgb => "RGB",
             },
         ));
+        // Split Document: the style is a reference, a built-in one by its `$ID/` name; an empty
+        // one splits on the styles' export tags.
+        let (break_doc, split_style) = match &s.epub_split {
+            designcraft_doc::EpubSplit::Off => (false, names::style_name_out(PARA_BUILTINS, st::BASIC_PARAGRAPH)),
+            designcraft_doc::EpubSplit::ExportTags => (true, String::new()),
+            designcraft_doc::EpubSplit::Style(n) if PARA_BUILTINS.iter().any(|(o, _)| o == n) => (true, names::style_name_out(PARA_BUILTINS, n)),
+            designcraft_doc::EpubSplit::Style(n) => (true, names::style_self("ParagraphStyle", PARA_BUILTINS, n)),
+        };
+        root.push(El::new("EPubExportPreference").attr("BreakDocument", bool_s(break_doc)).attr("ParagraphStyleName", split_style));
         let a = &s.advanced_type;
         root.push(
             El::new("TextPreference")
@@ -848,6 +866,9 @@ impl<'a> Ex<'a> {
             let pa = with_list_tab(pa, || (styles.resolve_para_style(&ps.name).0, parent_props));
             self.para_attrs(&mut el, &mut props, &pa, parent);
             self.char_attrs(&mut el, &mut props, &ca);
+            if styles.export_tag(&ps.name, false).is_some_and(|t| t.split) {
+                el.set("SplitDocument", "true");
+            }
             pg.insert(&ps.name, with_props(el, props));
         }
         let mut rp = El::new("RootParagraphStyleGroup").attr("Self", self.fresh());
@@ -1528,6 +1549,7 @@ impl<'a> Ex<'a> {
         }
         n!(keep_with_next, "KeepWithNext");
         b!(keep_lines_together, "KeepLinesTogether");
+        b!(ignore_optical_margin, "IgnoreEdgeAlignment");
         b!(keep_all_lines, "KeepAllLinesTogether");
         n!(keep_first, "KeepFirstLines");
         n!(keep_last, "KeepLastLines");
@@ -2070,6 +2092,53 @@ impl<'a> Ex<'a> {
         if let Some(c) = &g.clip {
             el.push(clipping_settings(c));
         }
+        if let Some(options) = &g.layer_options {
+            let mut option = El::new("GraphicLayerOption");
+            for (key, value) in &options.attributes {
+                if graphic_layer_attribute_name(key) {
+                    option.set(key, value);
+                }
+            }
+            // Only an ancestor whose subtree is still open can parent the next layer.
+            // Reopening a closed subtree would reorder native-edited lists on roundtrip.
+            let mut open = Vec::new();
+            let mut parents = Vec::with_capacity(options.layers.len());
+            for i in 0..options.layers.len() {
+                let parent = options.parents.get(i).copied().flatten();
+                if let Some(at) = parent.and_then(|p| open.iter().position(|id| *id == p)).filter(|at| *at < 239) {
+                    open.truncate(at + 1);
+                    parents.push(parent);
+                } else {
+                    open.clear();
+                    parents.push(None);
+                }
+                open.push(i);
+            }
+            let mut children: Vec<Vec<El>> = vec![Vec::new(); options.layers.len()];
+            let mut roots = Vec::new();
+            for (i, attributes) in options.layers.iter().enumerate().rev() {
+                let mut layer = El::new("GraphicLayer").attr("Self", self.fresh());
+                for (key, value) in attributes {
+                    if graphic_layer_attribute_name(key) {
+                        layer.set(key, value);
+                    }
+                }
+                if let Some(nested) = children.get_mut(i) {
+                    for child in std::mem::take(nested).into_iter().rev() {
+                        layer.push(child);
+                    }
+                }
+                if let Some(nested) = parents.get(i).copied().flatten().and_then(|parent| children.get_mut(parent)) {
+                    nested.push(layer);
+                } else {
+                    roots.push(layer);
+                }
+            }
+            for layer in roots.into_iter().rev() {
+                option.push(layer);
+            }
+            el.push(option);
+        }
         let uri = match &asset.link {
             Some(l) => path_to_uri(l),
             None => format!("file:{}", asset.name),
@@ -2226,8 +2295,11 @@ impl<'a> Ex<'a> {
             .attr("StoryTitle", "$ID/");
         el.push(
             El::new("StoryPreference")
-                .attr("OpticalMarginAlignment", "false")
-                .attr("OpticalMarginSize", "12")
+                .attr("OpticalMarginAlignment", bool_s(s.optical_margin.on))
+                .attr(
+                    "OpticalMarginSize",
+                    num(designcraft_doc::OpticalMargin::clamp_size(s.optical_margin.size).unwrap_or(designcraft_doc::OpticalMargin::DEFAULT_SIZE)),
+                )
                 .attr("FrameType", "TextFrameType")
                 .attr("StoryOrientation", if s.vertical { "Vertical" } else { "Horizontal" })
                 .attr(

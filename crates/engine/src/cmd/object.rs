@@ -584,7 +584,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Effects",
             [],
             None,
-            "{effects?: {dropShadow?: {on?, color?, opacity?, angle?, globalLight?, distance?, size?, spread?}, innerShadow?, outerGlow?, innerGlow? {on?, color?, opacity?, size?, choke?, center?, mode? (blend mode: Screen, Multiply, …; Screen by default), technique?: softer|precise}, bevel?, satin?, feather? (width), featherOptions? {choke? (%), corners?: sharp|rounded|diffused}, directionalFeather?, gradientFeather?} (the fields given replace the object's, as the Effects dialog sets them), opacity?: 0..1, blend?, ids?} — every effect at once, one undo step",
+            "{effects?: {dropShadow?: {on?, color?, opacity?, angle?, globalLight?, distance?, size?, spread?}, innerShadow?, outerGlow?, innerGlow? {on?, color?, opacity?, size?, choke?, center?, mode? (blend mode: Screen, Multiply, …; Screen by default), technique?: softer|precise}, bevel?, satin?, feather? (width), featherOptions? {choke? (%), corners?: sharp|rounded|diffused}, directionalFeather?, gradientFeather?} (the fields given replace the object's, as the Effects dialog sets them), opacity?: 0..1, blend?, globalLight? (the document's global light angle, as an Angle field with Use Global Light sets it), ids?} — every effect at once, one undo step",
             has_selection,
             effects_all
         ),
@@ -2334,8 +2334,16 @@ fn effects_all(s: &mut Session, p: &Value) -> Result<Value> {
             Some(BlendMode::parse(raw).ok_or_else(|| bad(ID, format!("unknown blend mode `{raw}`")))?)
         }
     };
+    // The document's global light angle, changed from an Angle field with Use Global Light on.
+    let global_light = match p.get("globalLight") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().filter(|a| a.is_finite()).ok_or_else(|| bad(ID, "globalLight must be a number"))?),
+    };
     let ids = targets(s, p)?;
     s.edit(|d, _| {
+        if let Some(a) = global_light {
+            d.settings.global_light = (a + 180.0).rem_euclid(360.0) - 180.0;
+        }
         let mut changed = 0;
         for id in &ids {
             let Some(it) = d.item_mut(*id) else { continue };
@@ -4185,6 +4193,26 @@ mod light_tests {
         assert_eq!(angle(&s), -160.0, "normalised to -180..180");
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(angle(&s), 45.0);
+    }
+
+    /// The Effects dialog's Angle with Use Global Light on changes the global light, with the
+    /// effects, in one undo step.
+    #[test]
+    fn effects_sets_the_global_light_with_the_effects() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let a = s.execute("frame.create", &json!({"rect": [10, 10, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+        let b = s.execute("frame.create", &json!({"rect": [60, 10, 90, 50]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.dropShadow", &json!({"on": true, "globalLight": true, "ids": [b]})).unwrap();
+        let before = s.doc().unwrap().doc.settings.global_light;
+        s.execute("object.effects", &json!({"ids": [a], "effects": {"dropShadow": {"on": true, "globalLight": true}}, "globalLight": 30})).unwrap();
+        let d = &s.doc().unwrap().doc;
+        assert_eq!(d.settings.global_light, 30.0);
+        let other = &d.item(ItemId(b)).unwrap().effects.drop_shadow;
+        assert_eq!(d.light_angle(other.angle, other.global_light), 30.0, "every shadow on Global Light follows");
+        assert!(s.execute("object.effects", &json!({"ids": [a], "globalLight": "up"})).is_err());
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.settings.global_light, before, "one undo step");
     }
 }
 

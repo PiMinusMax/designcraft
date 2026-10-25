@@ -50,7 +50,7 @@ pub fn specs() -> Vec<CommandSpec> {
             for st in d.stories.values().filter(|st| !st.endnotes.is_empty()) {
                 let first = d.endnote_start(st.id);
                 for (k, n) in st.endnotes.iter().enumerate() {
-                    out.push(json!({"story": st.id.0, "id": n.id, "number": first + k as u32, "text": n.text.text}));
+                    out.push(json!({"story": st.id.0, "id": n.id, "number": first.saturating_add(k as u32), "text": n.text.text}));
                 }
             }
             out.sort_by_key(|v| v["number"].as_u64());

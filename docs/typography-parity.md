@@ -1,6 +1,6 @@
 # Typography and composition parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-16 · **Change:** minor (Type › Reload Fonts reads fonts installed, edited or removed since start-up (#328, #547); Optical kerning from outlines (#181); macOS lists fonts that font services and managers activate; Justification dialog for the selected paragraphs; anchored objects wrap text; Tabs panel listed as present (#343); character stroke behind fill) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (Optical Margin Alignment per story with a size in the Story panel, and Ignore Optical Margin in the Paragraph panel menu and paragraph styles, kept through IDML (#947); Type › Reload Fonts reads fonts installed, edited or removed since start-up (#328, #547); Optical kerning from outlines (#181); macOS lists fonts that font services and managers activate; Justification dialog for the selected paragraphs; anchored objects wrap text; Tabs panel listed as present (#343); character stroke behind fill) · **Target:** Adobe InDesign 2026 (21.6)
 
 Typesetting is what InDesign is bought for. A feature can exist and still set text differently
 from InDesign: different line breaks, different page count, overset where InDesign fits. This
@@ -58,7 +58,7 @@ Fidelity: **unmeasured** unless stated.
 | Tabs | left/center/right/decimal/align-on, leaders, right-indent tab | ✓ | ~ | Tabs panel with a ruler over the text column, and a Tabs section in Paragraph Style Options (#343); wrapping of lines with tabs fixed (#282) |
 | Paragraph rules, borders, shading | ✓ | ✓ | ✓ | |
 | Balance ragged lines | ✓ | ✓ | ✓ | |
-| Optical margin alignment | ✓ | ✓ (hang table of our own) | ~ | hang amounts are ours, InDesign's unknown |
+| Optical margin alignment | per story with a size, Ignore Optical Margin per paragraph and style | ✓ (hang table of our own, scaled by the story's size; Story panel; IDML `StoryPreference`, `IgnoreEdgeAlignment`) | ~ | hang amounts are ours, InDesign's unknown (#947) |
 | Text wrap | bounding box, shape, jump object/column, wrap sides (text on both sides of an object), contour options, on page items and anchored objects | ✓ | ~ | Detect Edges, Alpha Channel and Photoshop Path contours follow the frame's path (composition doesn't read the image) |
 | Anchored objects | inline, above line, custom | ✓ | ~ | anchored objects in table cells not drawn (#163) |
 | Footnotes, endnotes | ✓ | ✓ | ~ | footnotes don't split across columns yet |
