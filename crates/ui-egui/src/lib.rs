@@ -1071,6 +1071,12 @@ impl DesignApp {
 
     /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        // Recovery data saved or opened by command (control channel, a script) while the timed
+        // save is being written: that one is recorded first, so an older snapshot can't land last.
+        #[cfg(not(target_arch = "wasm32"))]
+        if id.starts_with("file.recovery.") {
+            self.finish_recovery();
+        }
         if let Some(r) = menus::run_ui(self, id, &params) {
             return r;
         }
@@ -2826,6 +2832,28 @@ mod tests {
         // Recorded as this document's: closing it removes the checkpoint again.
         app.session.close_document(0);
         assert!(designcraft_engine::recovery::list(directory.path()).is_empty());
+    }
+
+    /// A recovery save by command while the timed one is being written waits for it, so the
+    /// command's newer snapshot is the one left on disk.
+    #[test]
+    fn a_recovery_save_by_command_waits_for_the_timed_one() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        let directory = tempfile::tempdir().unwrap();
+        app.session.recovery_dir = Some(directory.path().to_path_buf());
+        app.last_recovery = -1e9;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.logic(ui.ctx()));
+        out.textures_delta.clear();
+        assert!(app.recovery_job.is_some());
+        app.run("frame.create", json!({"rect": [10, 10, 50, 50]})).unwrap();
+        app.run("file.recovery.save", json!({})).unwrap();
+        assert!(app.recovery_job.is_none(), "the timed save was recorded first");
+        let saved = designcraft_engine::recovery::list(directory.path());
+        assert_eq!(saved.len(), 1);
+        let bytes = std::fs::read(directory.path().join(format!("{}.designcraft", saved[0].0))).unwrap();
+        let doc = designcraft_engine::cmd::from_bytes(&bytes).unwrap();
+        assert_eq!(doc.spreads[0].items.len(), app.session.active().unwrap().doc.spreads[0].items.len(), "the newer snapshot is on disk");
     }
 
     /// File ▸ Close (and its shortcut) closed a document with unsaved changes without asking, and
