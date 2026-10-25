@@ -108,10 +108,13 @@ impl QrStyle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum QrPart {
-    /// The square behind the code and its quiet zone.
+    /// The frame the code sits in: its fill is the background behind the code and its quiet
+    /// zone, its stroke the code's outline. (Earlier: a square of its own behind the code.)
     Background,
     /// The three finder patterns, in a colour of their own.
     Finders,
+    /// The frame in the middle holding the logo image.
+    Logo,
 }
 
 /// A QR code's shapes: the data modules, the three finder patterns, and where a logo goes.

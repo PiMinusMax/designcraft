@@ -101,10 +101,10 @@ pub fn decode(text: &str) -> Value {
     json!({"type": kind, "content": text})
 }
 
-/// What Edit QR Code starts from for the selected object, if it is (or holds) a generated code:
-/// the dialog's fields for its content, style and colours.
+/// What Edit QR Code starts from for the selected object, if it is, holds or is part of a
+/// generated code: the dialog's fields for its content, style and colours.
 pub fn edit_fields(d: &designcraft_doc::Document, sel: ItemId) -> Option<Value> {
-    let (container, code) = code_place(d, sel)?;
+    let code = find_code(d, sel)?;
     let c = d.item(code)?;
     let mut v = decode(c.alt_text.trim_start_matches(MARK));
     let q = c.qr.unwrap_or_default();
@@ -115,13 +115,29 @@ pub fn edit_fields(d: &designcraft_doc::Document, sel: ItemId) -> Option<Value> 
     v["roundness"] = json!(q.roundness);
     v["moduleSize"] = json!(q.scale);
     v["logoSize"] = json!(q.logo);
-    v["color"] = json!(fill_swatch(c).unwrap_or_default());
-    let siblings: Vec<std::sync::Arc<Item>> = container.and_then(|g| d.item(g)).map(|g| g.children().to_vec()).unwrap_or_default();
-    let part = |k: QrPart| siblings.iter().find(|i| i.qr_part == Some(k)).and_then(|i| fill_swatch(i)).unwrap_or_default();
-    v["finderColor"] = json!(part(QrPart::Finders));
-    v["background"] = json!(part(QrPart::Background));
+    let colors = Colors::of(d, code);
+    v["color"] = json!(colors.code);
+    v["finderColor"] = json!(colors.finders.unwrap_or_default());
+    v["background"] = json!(colors.background.unwrap_or_default());
     v["editing"] = json!(true);
     Some(v)
+}
+
+/// The objects a code is made of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Parts {
+    /// The frame it sits in: its fill is the background (none for a code made before).
+    pub frame: Option<ItemId>,
+    /// The code: its modules, and its finder patterns unless they have a colour of their own.
+    pub code: ItemId,
+    pub finders: Option<ItemId>,
+}
+
+/// The parts of the code the selected object is, holds or is part of.
+pub fn parts(d: &designcraft_doc::Document, sel: ItemId) -> Option<Parts> {
+    let code = find_code(d, sel)?;
+    let siblings = parent_of(d, code).and_then(|g| d.item(g)).map(|g| g.children().to_vec()).unwrap_or_default();
+    Some(Parts { frame: qr_frame_of(d, code), code, finders: siblings.iter().find(|i| i.qr_part == Some(QrPart::Finders)).map(|i| i.id) })
 }
 
 /// The style `p` asks for, starting from `base` (a re-encoded code's own): every key given
@@ -188,7 +204,8 @@ fn qr_item(id: ItemId, layer: designcraft_doc::LayerId, text: &str, r: Rect, col
 }
 
 /// The colours of a code's parts: the code, its finder patterns (with the code when `None`) and
-/// its background (none when `None`). Each is a swatch: a colour, a tint or a gradient.
+/// its background, the fill of the frame it sits in (none when `None`). Each is a swatch: a
+/// colour, a tint or a gradient.
 #[derive(Clone, Debug, PartialEq)]
 struct Colors {
     code: String,
@@ -201,7 +218,7 @@ impl Colors {
     /// `""` or `none` take that part away.
     fn from(p: &Value, base: Colors) -> Colors {
         let part = |k: &str, cur: Option<String>| match str_param(p, k) {
-            Some(v) if v.is_empty() || v.eq_ignore_ascii_case("none") || v == "[None]" => None,
+            Some(v) if v.is_empty() || v.eq_ignore_ascii_case("none") || v == designcraft_color::swatch::NONE => None,
             Some(v) => Some(v.to_string()),
             None => cur,
         };
@@ -211,11 +228,45 @@ impl Colors {
             background: part("background", base.background),
         }
     }
+
+    /// The colours code `code` has now: as its objects are filled, whichever tool filled them.
+    fn of(d: &designcraft_doc::Document, code: ItemId) -> Colors {
+        let swatch = |it: &Item| (!it.fill.is_none()).then(|| it.fill.swatch.clone());
+        let c = d.item(code);
+        let frame = qr_frame_of(d, code).and_then(|f| d.item(f));
+        let siblings: Vec<std::sync::Arc<Item>> = parent_of(d, code).and_then(|g| d.item(g)).map(|g| g.children().to_vec()).unwrap_or_default();
+        let part = |k: QrPart| siblings.iter().find(|i| i.qr_part == Some(k));
+        Colors {
+            code: c.map_or_else(|| designcraft_color::swatch::BLACK.into(), |c| c.fill.swatch.clone()),
+            finders: part(QrPart::Finders).and_then(|i| swatch(i)),
+            // The frame's fill; a code made before the frame carried it: its own square's.
+            background: frame.and_then(swatch).or_else(|| part(QrPart::Background).and_then(|i| swatch(i))),
+        }
+    }
 }
 
-/// The objects a code in `r` is made of, bottom to top: its background, the code (with its
-/// finder patterns unless they have a colour of their own), the finder patterns. One object
-/// when the code has one colour and no background.
+/// An object of a code drawn anew with `path`: an edited code's own object when there is one, so
+/// what the usual tools set on it (a gradient's direction, a stroke, effects, opacity) stays, and
+/// its fill changes only when the colour does.
+fn redraw(old: Option<&Item>, id: ItemId, layer: designcraft_doc::LayerId, path: designcraft_geom::PathData, swatch: &str) -> Item {
+    let mut it = match old {
+        Some(o) => {
+            let mut it = o.clone();
+            it.path = path;
+            it
+        }
+        None => Item::new(id, layer, Shape::Path, path),
+    };
+    if old.is_none_or(|o| o.fill.swatch != swatch) {
+        it.fill = Fill::swatch(swatch);
+    }
+    it
+}
+
+/// The objects a code in `r` is made of, back to front: the code (with its finder patterns unless
+/// they have a colour of their own) and the finder patterns, redrawn from an edited code's own
+/// (`old_code`, `old_finders`).
+#[allow(clippy::too_many_arguments)]
 fn qr_parts(
     d: &mut designcraft_doc::Document,
     layer: designcraft_doc::LayerId,
@@ -223,35 +274,24 @@ fn qr_parts(
     r: Rect,
     style: &QrStyle,
     colors: &Colors,
-    code_id: Option<ItemId>,
+    old_code: Option<&Item>,
+    old_finders: Option<&Item>,
 ) -> std::result::Result<Vec<Item>, String> {
     let shapes = designcraft_geom::qr::qr_shapes(text, r, style).ok_or("too much content for a QR code")?;
-    let mut out = Vec::new();
-    if let Some(bg) = &colors.background {
-        let mut it = Item::new(ItemId(d.alloc()), layer, Shape::Rectangle, designcraft_geom::shapes::rectangle(shapes.frame));
-        it.fill = Fill::swatch(bg);
-        it.qr_part = Some(QrPart::Background);
+    let fresh = qr_item(ItemId(0), layer, text, r, &colors.code, style)?;
+    let id = old_code.map_or_else(|| ItemId(d.alloc()), |c| c.id);
+    let path = if colors.finders.is_some() { shapes.modules } else { fresh.path };
+    let mut code = redraw(old_code, id, layer, path, &colors.code);
+    code.qr = fresh.qr;
+    code.alt_text = fresh.alt_text;
+    let mut out = vec![code];
+    if let Some(fc) = &colors.finders {
+        let id = old_finders.map_or_else(|| ItemId(d.alloc()), |f| f.id);
+        let mut it = redraw(old_finders, id, layer, shapes.finders, fc);
+        it.qr_part = Some(QrPart::Finders);
         out.push(it);
     }
-    let id = code_id.unwrap_or_else(|| ItemId(d.alloc()));
-    match &colors.finders {
-        None => out.push(qr_item(id, layer, text, r, &colors.code, style)?),
-        Some(fc) => {
-            let mut code = qr_item(id, layer, text, r, &colors.code, style)?;
-            code.path = shapes.modules;
-            out.push(code);
-            let mut it = Item::new(ItemId(d.alloc()), layer, Shape::Path, shapes.finders);
-            it.fill = Fill::swatch(fc);
-            it.qr_part = Some(QrPart::Finders);
-            out.push(it);
-        }
-    }
     Ok(out)
-}
-
-/// The swatch an object is filled with, if it is filled with one.
-fn fill_swatch(it: &Item) -> Option<String> {
-    (!it.fill.is_none()).then(|| it.fill.swatch.clone())
 }
 
 /// The group or frame an object sits in, if any (not the spread).
@@ -268,16 +308,68 @@ fn parent_of(d: &designcraft_doc::Document, id: ItemId) -> Option<ItemId> {
     parent
 }
 
-/// Where a code sits: the objects of its group or frame (`Some(container)`), or of the spread.
-/// Returns the container and the code's index among them.
-fn code_place(d: &designcraft_doc::Document, sel: ItemId) -> Option<(Option<ItemId>, ItemId)> {
-    let it = d.item(sel)?;
+/// How far a search for a code goes into groups and frames.
+const MAX_DEPTH: usize = 8;
+
+/// A generated code that is `it` or lies inside it, the frontmost one.
+fn code_under(it: &Item, depth: usize) -> Option<ItemId> {
     if it.alt_text.starts_with(MARK) {
-        return Some((parent_of(d, sel), sel));
+        return Some(it.id);
     }
-    // A group or frame holding a code: the code among its objects.
-    let code = it.children().iter().find(|c| c.alt_text.starts_with(MARK))?;
-    Some((Some(sel), code.id))
+    if depth == 0 {
+        return None;
+    }
+    it.children().iter().rev().find_map(|c| code_under(c, depth - 1))
+}
+
+/// The code the selected object is, holds (a code's frame, a group with one in it), or is a part
+/// of (its finder patterns or logo).
+fn find_code(d: &designcraft_doc::Document, sel: ItemId) -> Option<ItemId> {
+    let it = d.item(sel)?;
+    if let Some(c) = code_under(it, MAX_DEPTH) {
+        return Some(c);
+    }
+    if !matches!(it.qr_part, Some(QrPart::Finders | QrPart::Logo)) {
+        return None;
+    }
+    code_under(d.item(parent_of(d, sel)?)?, 1)
+}
+
+/// The frame a code sits in, if it sits in one (not in a group): its fill is the background.
+fn qr_frame_of(d: &designcraft_doc::Document, code: ItemId) -> Option<ItemId> {
+    let p = parent_of(d, code)?;
+    (d.item(p)?.shape != Shape::Group).then_some(p)
+}
+
+/// Puts `new` where the object `id` is (in its group or frame, or on its spread).
+fn replace_item(d: &mut designcraft_doc::Document, id: ItemId, new: Item) -> Result<()> {
+    let loc = d.find(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
+    let Some((&last, up)) = loc.path.split_last() else { return Err(designcraft_doc::DocError::NoItem(id).into()) };
+    let slot = if up.is_empty() {
+        d.spread_mut(loc.spread).and_then(|sp| sp.items.get_mut(last))
+    } else {
+        let parent = designcraft_doc::ItemLoc { spread: loc.spread, path: up.to_vec() };
+        d.item_mut_at(&parent).and_then(Item::children_mut).and_then(|items| items.get_mut(last))
+    };
+    *slot.ok_or(designcraft_doc::DocError::NoItem(id))? = std::sync::Arc::new(new);
+    Ok(())
+}
+
+/// A new code's frame on `r`'s square: the background as its fill, no stroke.
+fn qr_frame(d: &mut designcraft_doc::Document, layer: designcraft_doc::LayerId, r: Rect, colors: &Colors) -> Item {
+    let mut f = Item::new(ItemId(d.alloc()), layer, Shape::Rectangle, designcraft_geom::shapes::rectangle(r));
+    f.fill = colors.background.as_deref().map_or_else(Fill::none, Fill::swatch);
+    f.qr_part = Some(QrPart::Background);
+    f
+}
+
+/// What [`qr_code`]'s edit leaves to do after it: the frame, where a logo goes (frame space), and
+/// a logo frame moved to a new area, to fit its image again.
+struct Made {
+    select: ItemId,
+    frame: ItemId,
+    logo_area: Option<Rect>,
+    refit: Option<ItemId>,
 }
 
 fn qr_code(s: &mut Session, p: &Value) -> Result<Value> {
@@ -289,32 +381,15 @@ fn qr_code(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let lid = st.active_layer;
     let sel = st.selection.items.clone();
-    let editing = if rect.is_some() { None } else { sel.first().and_then(|t| code_place(&st.doc, *t)) };
+    let editing = if rect.is_some() { None } else { sel.first().and_then(|t| find_code(&st.doc, *t)) };
     // An edited code keeps its style and colours unless the params change them.
-    let (base_style, base_colors) = match editing.and_then(|(container, code)| {
-        let d = &st.doc;
-        let c = d.item(code)?;
-        let siblings: Vec<std::sync::Arc<Item>> = match container {
-            Some(g) => d.item(g)?.children().to_vec(),
-            None => Vec::new(),
-        };
-        let part = |k: QrPart| siblings.iter().find(|i| i.qr_part == Some(k)).and_then(|i| fill_swatch(i));
-        Some((
-            c.qr.unwrap_or_default(),
-            Colors {
-                code: fill_swatch(c).unwrap_or_else(|| designcraft_color::swatch::BLACK.into()),
-                finders: part(QrPart::Finders),
-                background: part(QrPart::Background),
-            },
-        ))
-    }) {
+    let (base_style, base_colors) = match editing.and_then(|code| Some((st.doc.item(code)?.qr.unwrap_or_default(), Colors::of(&st.doc, code)))) {
         Some(b) => b,
         None => (QrStyle::default(), Colors { code: designcraft_color::swatch::BLACK.into(), finders: None, background: None }),
     };
     let style = style_param(p, base_style).map_err(|e| bad(ID, e))?;
     let colors = Colors::from(p, base_colors);
-    // (the object to select, the code, where the logo goes in the code's space, objects to group)
-    let (id, code, logo, group) = s.edit(|d, selection| {
+    let made = s.edit(|d, selection| {
         for c in [Some(&colors.code), colors.finders.as_ref(), colors.background.as_ref()].into_iter().flatten() {
             if d.swatch(c).is_none() {
                 return Err(bad(ID, format!("no swatch `{c}`")));
@@ -323,133 +398,214 @@ fn qr_code(s: &mut Session, p: &Value) -> Result<Value> {
         let logo_in = |r: Rect| designcraft_geom::qr::qr_shapes(&text, r, &style).and_then(|q| q.logo);
         let made = match (rect, sel.first().copied(), editing) {
             (Some(r), _, _) => {
-                let parts = qr_parts(d, lid, &text, r, &style, &colors, None).map_err(|e| bad(ID, e))?;
-                let code = parts.iter().find(|i| i.alt_text.starts_with(MARK)).map(|i| i.id).ok_or_else(|| bad(ID, "no code"))?;
-                let ids: Vec<ItemId> = parts.iter().map(|i| i.id).collect();
-                for it in parts {
-                    d.insert_item(sr, it, None)?;
-                }
-                (code, code, logo_in(r), (ids.len() > 1).then_some(ids))
+                // A new code: a frame on the code's square (with its quiet zone), the parts in it.
+                let square = designcraft_geom::qr::qr_shapes(&text, r, &style).ok_or_else(|| bad(ID, "too much content for a QR code"))?.frame;
+                let parts = qr_parts(d, lid, &text, square, &style, &colors, None, None).map_err(|e| bad(ID, e))?;
+                let mut f = qr_frame(d, lid, square, &colors);
+                f.content = Content::Group { items: parts.into_iter().map(std::sync::Arc::new).collect() };
+                let fid = d.insert_item(sr, f, None)?;
+                Made { select: fid, frame: fid, logo_area: logo_in(square), refit: None }
             }
-            (None, _, Some((container, code_id))) => {
-                // Edit QR Code: the same square, the parts drawn anew; a logo and other objects stay.
+            (None, _, Some(code_id)) => {
+                // Edit QR Code: the parts drawn anew in the code's frame; what else is in it stays.
                 let c = d.item(code_id).ok_or(designcraft_doc::DocError::NoItem(code_id))?.clone();
-                let siblings: Vec<std::sync::Arc<Item>> = match container {
-                    Some(g) => d.item(g).map(|g| g.children().to_vec()).unwrap_or_default(),
-                    None => vec![std::sync::Arc::new(c.clone())],
-                };
-                let finders = siblings.iter().find(|i| i.qr_part == Some(QrPart::Finders));
-                let symbol = finders.and_then(|f| f.path.bounds()).into_iter().chain(c.path.bounds()).reduce(|a, b| a.union(b)).unwrap_or(Rect::ZERO);
-                let n = designcraft_geom::qr::qr_size_at(c.alt_text.trim_start_matches(MARK), c.qr.unwrap_or_default().ecc).unwrap_or(21);
-                let quiet = symbol.width() / n as f64 * 2.0;
-                let side = symbol.width().max(symbol.height()) + 2.0 * quiet;
-                let r = Rect::from_center_size(symbol.center(), (side, side));
-                let parts = qr_parts(d, c.layer, &text, r, &style, &colors, Some(code_id)).map_err(|e| bad(ID, e))?;
-                let new_ids: Vec<ItemId> = parts.iter().map(|i| i.id).collect();
-                let is_part = |i: &Item| i.id == code_id || i.qr_part.is_some();
-                match container {
-                    Some(g) => {
-                        let items = d.item_mut(g).and_then(Item::children_mut).ok_or(designcraft_doc::DocError::NoItem(g))?;
-                        let at = items.iter().position(|i| is_part(i)).unwrap_or(0);
-                        items.retain(|i| !is_part(i));
-                        for (k, it) in parts.into_iter().enumerate() {
-                            items.insert((at + k).min(items.len()), std::sync::Arc::new(it));
-                        }
-                        (sel.first().copied().unwrap_or(g), code_id, logo_in(r), None)
-                    }
+                let fid = match qr_frame_of(d, code_id) {
+                    Some(f) => f,
                     None => {
-                        // A lone code: replaced where it is; more parts than one become a group.
-                        let loc = d.find(code_id).ok_or(designcraft_doc::DocError::NoItem(code_id))?;
-                        let spread = loc.spread;
-                        let at = loc.path.first().copied();
-                        d.remove_item(code_id)?;
-                        for (k, it) in parts.into_iter().enumerate() {
-                            d.insert_item(spread, it, at.map(|i| i + k))?;
+                        // A code made without a frame: a frame on its square takes its place.
+                        // The symbol: the code with its finder patterns, wherever they are.
+                        let beside = parent_of(d, code_id)
+                            .and_then(|g| d.item(g))
+                            .and_then(|g| g.children().iter().find(|i| i.qr_part == Some(QrPart::Finders)).cloned());
+                        let finders_beside = beside.and_then(|f| f.path.bounds().map(|b| (c.xf.inverse() * f.xf).transform_rect_bbox(b)));
+                        let symbol = c.path.bounds().into_iter().chain(finders_beside).reduce(|a, b| a.union(b)).unwrap_or(Rect::ZERO);
+                        let n = designcraft_geom::qr::qr_size_at(c.alt_text.trim_start_matches(MARK), c.qr.unwrap_or_default().ecc).unwrap_or(21);
+                        let quiet = symbol.width() / n as f64 * 2.0;
+                        let side = symbol.width().max(symbol.height()) + 2.0 * quiet;
+                        let r = Rect::from_center_size(symbol.center(), (side, side));
+                        let mut f = qr_frame(d, c.layer, r, &colors);
+                        f.xf = c.xf;
+                        let mut inner = c.clone();
+                        inner.xf = designcraft_geom::Affine::IDENTITY;
+                        let mut items = vec![std::sync::Arc::new(inner)];
+                        // Its own background square and finder patterns, beside it in a group,
+                        // move in with it (the frame's fill takes over the background).
+                        let legacy: Vec<std::sync::Arc<Item>> = parent_of(d, code_id)
+                            .and_then(|g| d.item(g))
+                            .map(|g| {
+                                g.children().iter().filter(|i| matches!(i.qr_part, Some(QrPart::Background | QrPart::Finders))).cloned().collect()
+                            })
+                            .unwrap_or_default();
+                        for l in legacy {
+                            d.remove_item(l.id)?;
+                            if l.qr_part == Some(QrPart::Finders) {
+                                let mut l = (*l).clone();
+                                l.xf = c.xf.inverse() * l.xf;
+                                items.push(std::sync::Arc::new(l));
+                            }
                         }
-                        (code_id, code_id, logo_in(r), (new_ids.len() > 1).then_some(new_ids))
+                        f.content = Content::Group { items };
+                        let fid = f.id;
+                        replace_item(d, code_id, f)?;
+                        fid
                     }
+                };
+                let frame = d.item(fid).ok_or(designcraft_doc::DocError::NoItem(fid))?.clone();
+                let r = frame.inner_bounds();
+                let kids = frame.children();
+                let finders = kids.iter().find(|i| i.qr_part == Some(QrPart::Finders)).map(|i| (**i).clone());
+                let logo = kids.iter().find(|i| i.qr_part == Some(QrPart::Logo)).map(|i| (**i).clone());
+                let parts = qr_parts(d, c.layer, &text, r, &style, &colors, Some(&c), finders.as_ref()).map_err(|e| bad(ID, e))?;
+                let area = logo_in(r);
+                // The logo: kept and moved to the new clear area, or gone with it or a new file.
+                let logo = logo.filter(|_| area.is_some() && logo_file.is_none());
+                let mut refit = None;
+                let logo = logo.map(|mut l| {
+                    if let Some(a) = area
+                        && l.xf.transform_rect_bbox(l.inner_bounds()) != a
+                    {
+                        l.path = designcraft_geom::shapes::rectangle(a);
+                        l.xf = designcraft_geom::Affine::IDENTITY;
+                        refit = Some(l.id);
+                    }
+                    l
+                });
+                let f = d.item_mut(fid).ok_or(designcraft_doc::DocError::NoItem(fid))?;
+                let own = (!f.fill.is_none()).then(|| f.fill.swatch.clone());
+                if own != colors.background || f.qr_part.is_none() {
+                    f.fill = colors.background.as_deref().map_or_else(Fill::none, Fill::swatch);
                 }
+                f.qr_part = Some(QrPart::Background);
+                let items = f.children_mut().ok_or(designcraft_doc::DocError::NoItem(fid))?;
+                let at = items.iter().position(|i| i.id == code_id).unwrap_or(0);
+                items.retain(|i| i.id != code_id && i.qr_part.is_none());
+                let at = at.min(items.len());
+                for (k, it) in parts.into_iter().chain(logo).enumerate() {
+                    items.insert((at + k).min(items.len()), std::sync::Arc::new(it));
+                }
+                // The selection stays (the frame, a group around it, a part); else the frame.
+                let keep = sel.first().copied().filter(|s| d.item(*s).is_some());
+                Made { select: keep.unwrap_or(fid), frame: fid, logo_area: if logo_file.is_some() { area } else { None }, refit }
             }
             (None, Some(t), None) => {
-                // Into the frame: the code fills it, as content.
+                // Into the frame: it becomes the code's frame, the parts its content.
                 let it = d.item(t).ok_or_else(|| bad(ID, "no such object"))?.clone();
                 if !matches!(it.content, Content::Unassigned | Content::Group { .. }) || it.shape == Shape::Group {
                     return Err(bad(ID, "select an empty frame, a QR code, or give `rect`"));
                 }
                 let r = it.inner_bounds();
-                let parts = qr_parts(d, it.layer, &text, r, &style, &colors, None).map_err(|e| bad(ID, e))?;
-                let code = parts.iter().find(|i| i.alt_text.starts_with(MARK)).map(|i| i.id).ok_or_else(|| bad(ID, "no code"))?;
+                let parts = qr_parts(d, it.layer, &text, r, &style, &colors, None, None).map_err(|e| bad(ID, e))?;
                 let f = d.item_mut(t).ok_or(designcraft_doc::DocError::NoItem(t))?;
                 f.content = Content::Group { items: parts.into_iter().map(std::sync::Arc::new).collect() };
-                (t, code, logo_in(r), None)
+                f.fill = colors.background.as_deref().map_or_else(Fill::none, Fill::swatch);
+                f.qr_part = Some(QrPart::Background);
+                Made { select: t, frame: t, logo_area: logo_in(r), refit: None }
             }
             (None, None, _) => return Err(bad(ID, "give `rect` or select a frame")),
         };
-        *selection = Selection::items(vec![made.0]);
+        *selection = Selection::items(vec![made.select]);
         Ok(made)
     })?;
-    let mut out = json!({"id": id.0, "content": text});
-    let mut id = id;
-    // A code in more than one part: one group (part of this undo step, as all this command runs).
-    if let Some(ids) = group {
-        let g = s.execute("object.group", &json!({"ids": ids.iter().map(|i| i.0).collect::<Vec<_>>()}))?;
-        if let Some(g) = g["id"].as_u64() {
-            id = ItemId(g);
-            out["id"] = json!(g);
-        }
+    let mut out = json!({"id": made.select.0, "frame": made.frame.0, "content": text});
+    if let Some(l) = made.refit {
+        s.execute("object.fit", &json!({"mode": "fitProportionally", "ids": [l.0]}))?;
     }
-    // The logo: a frame on the clear area with the image fitted in it, grouped with the code.
-    if let (Some(file), Some(area)) = (logo_file, logo) {
+    // A logo file: a frame on the clear area with the image fitted in it, moved into the code's
+    // frame (all part of this one undo step, as everything this command runs).
+    if let (Some(file), Some(area)) = (logo_file, made.logo_area) {
         let d = &s.doc()?.doc;
-        let loc = d.find(code).ok_or(designcraft_doc::DocError::NoItem(code))?;
-        let to_spread = d.parent_xf(&loc) * d.item(code).ok_or(designcraft_doc::DocError::NoItem(code))?.xf;
+        let fid = made.frame;
+        let loc = d.find(fid).ok_or(designcraft_doc::DocError::NoItem(fid))?;
+        let to_spread = d.parent_xf(&loc) * d.item(fid).ok_or(designcraft_doc::DocError::NoItem(fid))?.xf;
         let a = to_spread.transform_rect_bbox(area);
         let spread = match loc.spread {
             designcraft_doc::SpreadRef::Doc(i) => json!({"kind": "doc", "index": i}),
             designcraft_doc::SpreadRef::Parent(i) => json!({"kind": "parent", "index": i}),
         };
-        let frame = s.execute("frame.create", &json!({"rect": [a.x0, a.y0, a.x1, a.y1], "content": "unassigned", "spread": spread}))?["id"].clone();
-        s.execute("file.place", &json!({"path": file, "frame": frame}))?;
-        s.execute("object.fit", &json!({"mode": "fitProportionally", "ids": [frame]}))?;
-        let group = s.execute("object.group", &json!({"ids": [id.0, frame]}))?;
-        out["logo"] = frame;
-        out["id"] = group["id"].clone();
+        let logo = s.execute("frame.create", &json!({"rect": [a.x0, a.y0, a.x1, a.y1], "content": "unassigned", "spread": spread}))?["id"].clone();
+        s.execute("file.place", &json!({"path": file, "frame": logo}))?;
+        s.execute("object.fit", &json!({"mode": "fitProportionally", "ids": [logo]}))?;
+        let lid = ItemId(logo.as_u64().ok_or_else(|| bad(ID, "no logo frame"))?);
+        let select = made.select;
+        s.edit(|d, selection| {
+            let mut l = (*d.remove_item(lid)?).clone();
+            l.xf = to_spread.inverse() * l.xf;
+            l.stroke = designcraft_doc::Stroke::none();
+            l.qr_part = Some(QrPart::Logo);
+            let items = d.item_mut(fid).and_then(Item::children_mut).ok_or(designcraft_doc::DocError::NoItem(fid))?;
+            items.push(std::sync::Arc::new(l));
+            *selection = Selection::items(vec![select]);
+            Ok(())
+        })?;
+        out["logo"] = logo;
     }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use designcraft_doc::Content;
-    use designcraft_geom::qr::{Ecc, Finder, Modules};
+    use designcraft_doc::{Content, Item, ItemId};
+    use designcraft_geom::qr::{Ecc, Finder, Modules, QrPart, QrStyle};
     use serde_json::json;
 
     use super::MARK;
 
     use crate::Session;
 
-    #[test]
-    fn generate_and_edit_qr_codes() {
+    fn new_doc() -> Session {
         let mut s = Session::new();
         s.execute("file.new", &json!({})).unwrap();
+        s
+    }
+
+    fn item(s: &Session, id: ItemId) -> Item {
+        s.doc().unwrap().doc.item(id).unwrap().clone()
+    }
+
+    /// The code an object is, holds or is part of.
+    fn code(s: &Session, id: ItemId) -> Item {
+        let d = &s.doc().unwrap().doc;
+        d.item(super::find_code(d, id).unwrap()).unwrap().clone()
+    }
+
+    fn id(v: &serde_json::Value) -> ItemId {
+        ItemId(v["id"].as_u64().unwrap())
+    }
+
+    /// A code as Generate QR Code made it before codes had a frame: one path on the spread.
+    fn lone_code(s: &mut Session, text: &str, r: designcraft_geom::Rect, color: &str) -> ItemId {
+        s.edit(|d, _| {
+            let lid = d.layers[0].id;
+            let it = super::qr_item(ItemId(d.alloc()), lid, text, r, color, &QrStyle::default()).unwrap();
+            Ok(d.insert_item(designcraft_doc::SpreadRef::Doc(0), it, None)?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn generate_and_edit_qr_codes() {
+        let mut s = new_doc();
         let r = s.execute("object.qrCode", &json!({"content": "https://example.com", "rect": [72, 72, 216, 216]})).unwrap();
-        let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
-        let item = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().clone();
-        let a = item(&s);
+        let frame = id(&r);
+        let f = item(&s, frame);
+        assert_eq!(f.shape, designcraft_doc::Shape::Rectangle, "a code is a frame");
+        assert_eq!(f.qr_part, Some(QrPart::Background));
+        let a = code(&s, frame);
         assert!(a.path.subpaths.len() > 20 && a.alt_text.contains("example.com"));
         let b0 = a.bounds();
         assert!(b0.x0 >= 72.0 && b0.x1 <= 216.0);
         // Edit QR Code: new content, same place.
         let r = s.execute("object.qrCode", &json!({"type": "email", "to": "a@b.c", "subject": "Hi"})).unwrap();
         assert_eq!(r["content"], "MATMSG:TO:a@b.c;SUB:Hi;BODY:;;");
-        let b1 = item(&s).bounds();
+        let b1 = code(&s, frame).bounds();
         assert!((b1.center() - b0.center()).hypot() < 1.0, "{b0:?} → {b1:?}");
         assert!((b1.width() - b0.width()).abs() < 4.0);
+        assert_eq!(s.doc().unwrap().doc.spreads[0].items.len(), 1, "still one object");
         // Into an empty frame.
         let f = s.execute("frame.create", &json!({"rect": [300, 300, 400, 400], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
         s.execute("object.qrCode", &json!({"type": "vcard", "name": "Ada", "phone": "+44 1"})).unwrap();
-        let fr = s.doc().unwrap().doc.item(designcraft_doc::ItemId(f)).unwrap().clone();
-        assert!(fr.has_nested_items());
+        let fr = item(&s, ItemId(f));
+        assert!(fr.has_nested_items() && fr.qr_part == Some(QrPart::Background));
         assert!(s.execute("object.qrCode", &json!({"type": "fax", "content": "x", "rect": [0, 0, 9, 9]})).is_err());
     }
 
@@ -457,22 +613,21 @@ mod tests {
     /// classic code stores none.
     #[test]
     fn a_styled_code_keeps_its_style_when_edited() {
-        let mut s = Session::new();
-        s.execute("file.new", &json!({})).unwrap();
-        let classic = s.execute("object.qrCode", &json!({"content": "a", "rect": [10, 10, 110, 110]})).unwrap()["id"].as_u64().unwrap();
-        assert!(s.doc().unwrap().doc.item(designcraft_doc::ItemId(classic)).unwrap().qr.is_none());
+        let mut s = new_doc();
+        let classic = id(&s.execute("object.qrCode", &json!({"content": "a", "rect": [10, 10, 110, 110]})).unwrap());
+        assert!(code(&s, classic).qr.is_none());
         let r = s
             .execute(
                 "object.qrCode",
                 &json!({"content": "https://example.com", "rect": [200, 200, 300, 300], "modules": "dots", "finder": "circle", "ecc": "q", "moduleSize": 0.8, "roundness": 0.5}),
             )
             .unwrap();
-        let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
-        let style = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().qr.unwrap();
+        let fid = id(&r);
+        let style = |s: &Session| code(s, fid).qr.unwrap();
         let st = style(&s);
         assert_eq!((st.modules, st.finder, st.ecc, st.scale, st.roundness), (Modules::Dots, Finder::Circle, Ecc::Quartile, 0.8, 0.5));
         // Edit QR Code with new content only: the look stays; a given key still changes it.
-        s.execute("selection.set", &json!({"ids": [id.0]})).unwrap();
+        s.execute("selection.set", &json!({"ids": [fid.0]})).unwrap();
         s.execute("object.qrCode", &json!({"content": "https://example.org"})).unwrap();
         assert_eq!(style(&s), st);
         s.execute("object.qrCode", &json!({"content": "https://example.org", "modules": "connected"})).unwrap();
@@ -486,46 +641,55 @@ mod tests {
         }
     }
 
-    /// A logo file goes on the clear area in the middle, fitted, grouped with the code, at High
-    /// error correction, and the whole is one undo step.
+    /// A logo file goes on the clear area in the middle, fitted, inside the code's frame and
+    /// without a stroke, at High error correction; the whole is one undo step, and editing the
+    /// code keeps the logo, moved to a new clear area.
     #[test]
     fn a_logo_is_placed_in_the_middle_in_one_undo_step() {
         let dir = std::env::temp_dir().join(format!("dc-qr-logo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("logo.png");
         std::fs::write(&png, designcraft_render::Rendered { width: 40, height: 40, pixels: vec![200u8; 40 * 40 * 4] }.to_png()).unwrap();
-        let mut s = Session::new();
-        s.execute("file.new", &json!({})).unwrap();
+        let mut s = new_doc();
         let undo = |s: &Session| s.doc().unwrap().history.undo.len();
         let before = undo(&s);
         let r = s
             .execute("object.qrCode", &json!({"content": "https://example.com", "rect": [100, 100, 300, 300], "logo": png.to_string_lossy()}))
             .unwrap();
         assert_eq!(undo(&s), before + 1, "one undo step");
-        let d = &s.doc().unwrap().doc;
-        let group = d.item(designcraft_doc::ItemId(r["id"].as_u64().unwrap())).unwrap();
-        assert!(group.is_group());
-        let logo = d.item(designcraft_doc::ItemId(r["logo"].as_u64().unwrap())).unwrap();
+        let fid = id(&r);
+        let logo_of = |s: &Session| item(s, fid).children().iter().find(|c| c.qr_part == Some(QrPart::Logo)).map(|c| (**c).clone());
+        let logo = logo_of(&s).expect("the logo is in the code's frame");
         assert!(matches!(logo.content, Content::Graphic(_)), "the image is in the logo frame");
-        let code = group.children().iter().find(|c| c.alt_text.starts_with(MARK)).unwrap();
-        assert_eq!(code.qr.unwrap().ecc, Ecc::High, "High unless given");
-        assert!((code.qr.unwrap().logo - 0.25).abs() < 1e-9);
+        assert!(logo.stroke.is_none(), "no stroke around the logo");
+        assert_eq!(s.doc().unwrap().doc.spreads[0].items.len(), 1, "one object");
+        let c = code(&s, fid);
+        assert_eq!(c.qr.unwrap().ecc, Ecc::High, "High unless given");
+        assert!((c.qr.unwrap().logo - 0.25).abs() < 1e-9);
         let b = logo.bounds();
         assert!((b.center() - designcraft_geom::Point::new(200.0, 200.0)).hypot() < 1.0, "centred: {b:?}");
         assert!(b.width() < 200.0 * 0.3, "within the clear area: {b:?}");
-        s.execute("edit.undo", &json!({})).unwrap();
+        // Edited with a bigger clear area: the same logo, grown with it; with none, it goes.
+        s.execute("selection.set", &json!({"ids": [fid.0]})).unwrap();
+        s.execute("object.qrCode", &json!({"content": "https://example.org", "logoSize": 0.3})).unwrap();
+        let grown = logo_of(&s).unwrap();
+        assert_eq!(grown.id, logo.id);
+        assert!(grown.bounds().width() > b.width() + 1.0, "{:?} → {:?}", b, grown.bounds());
+        s.execute("object.qrCode", &json!({"content": "https://example.org", "logoSize": 0})).unwrap();
+        assert!(logo_of(&s).is_none());
+        for _ in 0..3 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty(), "undo takes code and logo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A code with a background and finder patterns in a colour of their own is a group of three
-    /// ordinary objects; a gradient swatch colours the code; editing keeps the colours; a one-colour
-    /// code given a background on editing becomes a group in its place.
+    /// The frame's fill is the background and its stroke the code's outline, as on any frame; the
+    /// code and its finder patterns are ordinary objects inside it. What the usual tools set on
+    /// them (a fill, a gradient's direction, a stroke) survives editing, and the dialog shows it.
     #[test]
-    fn coloured_parts_are_ordinary_objects_that_editing_keeps() {
-        use designcraft_geom::qr::QrPart;
-        let mut s = Session::new();
-        s.execute("file.new", &json!({})).unwrap();
+    fn the_usual_tools_colour_a_code_and_editing_keeps_it() {
+        let mut s = new_doc();
         // A gradient swatch to colour the code with.
         let g = s.execute("frame.create", &json!({"rect": [500, 500, 520, 520], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
         s.execute("object.gradient", &json!({"ids": [g], "stops": [{"location": 0, "color": {"c": 100, "m": 0, "y": 0, "k": 0}}, {"location": 100, "color": {"c": 0, "m": 100, "y": 0, "k": 0}}]})).unwrap();
@@ -537,43 +701,125 @@ mod tests {
                 &json!({"content": "https://example.com", "rect": [100, 100, 200, 200], "color": grad, "finderColor": "C=100 M=0 Y=0 K=0", "background": "[Paper]"}),
             )
             .unwrap();
-        let gid = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
-        let parts = |s: &Session, id: designcraft_doc::ItemId| -> Vec<(Option<QrPart>, bool, String)> {
-            s.doc()
-                .unwrap()
-                .doc
-                .item(id)
-                .unwrap()
-                .children()
-                .iter()
-                .map(|c| (c.qr_part, c.alt_text.starts_with(MARK), c.fill.swatch.clone()))
-                .collect()
-        };
-        assert_eq!(
-            parts(&s, gid),
-            [
-                (Some(QrPart::Background), false, "[Paper]".to_string()),
-                (None, true, grad.clone()),
-                (Some(QrPart::Finders), false, "C=100 M=0 Y=0 K=0".to_string())
-            ],
-            "background, code, finder patterns"
-        );
-        // Edit with new content only: the same parts and colours.
-        s.execute("selection.set", &json!({"ids": [gid.0]})).unwrap();
+        let fid = id(&r);
+        let f = item(&s, fid);
+        assert_eq!(f.fill.swatch, "[Paper]", "the background is the frame's fill");
+        let kids: Vec<(Option<QrPart>, bool, String)> =
+            f.children().iter().map(|c| (c.qr_part, c.alt_text.starts_with(MARK), c.fill.swatch.clone())).collect();
+        assert_eq!(kids, [(None, true, grad.clone()), (Some(QrPart::Finders), false, "C=100 M=0 Y=0 K=0".to_string())]);
+        // The usual tools: the frame's fill and stroke; the code (selected inside) a gradient's
+        // direction and a stroke.
+        let cid = code(&s, fid).id;
+        s.execute("object.fill", &json!({"ids": [fid.0], "swatch": "[Black]", "tint": 0.2})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [fid.0], "swatch": "[Black]", "weight": 2})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [cid.0], "swatch": "[Black]", "weight": 0.5})).unwrap();
+        s.edit(|d, _| {
+            d.item_mut(cid).unwrap().fill.gradient_vector = Some([100.0, 100.0, 200.0, 200.0]);
+            Ok(())
+        })
+        .unwrap();
+        let fields = super::edit_fields(&s.doc().unwrap().doc, fid).unwrap();
+        assert_eq!((fields["background"].as_str(), fields["color"].as_str()), (Some("[Black]"), Some(grad.as_str())));
+        // Edit from the code itself (selected inside the frame) with new content only.
+        s.execute("selection.set", &json!({"ids": [cid.0]})).unwrap();
         s.execute("object.qrCode", &json!({"content": "https://example.org/a/longer/address"})).unwrap();
-        assert_eq!(parts(&s, gid).iter().map(|p| (p.0, p.1, p.2.clone())).collect::<Vec<_>>()[1].2, grad);
-        assert_eq!(parts(&s, gid).len(), 3);
-        // The finder patterns back to the code's colour: that part goes.
-        s.execute("object.qrCode", &json!({"content": "https://example.org", "finderColor": "none"})).unwrap();
-        assert_eq!(parts(&s, gid).iter().filter(|p| p.0 == Some(QrPart::Finders)).count(), 0);
-        // A lone one-colour code given a background becomes a group where it was.
-        let lone = s.execute("object.qrCode", &json!({"content": "x", "rect": [300, 100, 400, 200]})).unwrap()["id"].as_u64().unwrap();
-        s.execute("selection.set", &json!({"ids": [lone]})).unwrap();
-        let r = s.execute("object.qrCode", &json!({"content": "x", "background": "[Paper]"})).unwrap();
-        let d = &s.doc().unwrap().doc;
-        let group = d.item(designcraft_doc::ItemId(r["id"].as_u64().unwrap())).unwrap();
-        assert!(group.is_group() && group.children().len() == 2, "{:?}", group.children().len());
+        let (f, c) = (item(&s, fid), code(&s, fid));
+        assert_eq!((f.fill.swatch.as_str(), f.fill.tint, f.stroke.weight), ("[Black]", 0.2, 2.0), "the frame keeps fill, tint and stroke");
+        assert_eq!((c.fill.swatch.clone(), c.fill.gradient_vector, c.stroke.weight), (grad.clone(), Some([100.0, 100.0, 200.0, 200.0]), 0.5));
+        assert!(c.alt_text.ends_with("longer/address"));
+        assert_eq!(s.doc().unwrap().selection.items, vec![cid], "the code stays selected");
+        // A colour picked in the dialog replaces the fill; the finder patterns back to the code's.
+        s.execute("selection.set", &json!({"ids": [fid.0]})).unwrap();
+        s.execute("object.qrCode", &json!({"content": "x", "color": "[Black]", "finderColor": "none", "background": "none"})).unwrap();
+        let f = item(&s, fid);
+        assert!(f.fill.is_none() && f.children().len() == 1 && f.children()[0].fill.swatch == "[Black]");
         assert!(s.execute("object.qrCode", &json!({"content": "x", "rect": [0, 0, 9, 9], "background": "Nope"})).is_err());
+    }
+
+    /// Codes made before codes had a frame open as they were and edit like new ones: a lone code
+    /// (one path), a group of a background square, the code and finder patterns, and a frame
+    /// holding a background square and the code. Each becomes a frame where it was, with its
+    /// colours, and nothing doubles.
+    #[test]
+    fn codes_made_before_stay_editable() {
+        // A lone code.
+        let mut s = new_doc();
+        let r = designcraft_geom::Rect::new(100.0, 100.0, 200.0, 200.0);
+        let lone = lone_code(&mut s, "https://old.example", r, "[Black]");
+        let before = item(&s, lone).bounds();
+        let fields = super::edit_fields(&s.doc().unwrap().doc, lone).unwrap();
+        assert_eq!(
+            (fields["content"].as_str(), fields["color"].as_str(), fields["background"].as_str()),
+            (Some("https://old.example"), Some("[Black]"), Some(""))
+        );
+        s.execute("selection.set", &json!({"ids": [lone.0]})).unwrap();
+        let out = s.execute("object.qrCode", &json!({"content": "https://old.example"})).unwrap();
+        let items = &s.doc().unwrap().doc.spreads[0].items;
+        assert_eq!(items.len(), 1);
+        let f = &items[0];
+        assert_eq!((f.qr_part, f.fill.is_none()), (Some(QrPart::Background), true));
+        let after = code(&s, f.id).bounds();
+        assert!((after.x0 - before.x0).abs() < 0.01 && (after.x1 - before.x1).abs() < 0.01, "{before:?} → {after:?}");
+        assert_eq!(code(&s, f.id).id, lone, "the code keeps its id");
+        assert!(out["id"].as_u64().is_some());
+
+        // A group of a background square, the code and finder patterns (as the first preview made).
+        let mut s = new_doc();
+        let r = s
+            .execute(
+                "object.qrCode",
+                &json!({"content": "https://example.com", "rect": [100, 100, 200, 200], "finderColor": "[Registration]", "background": "[Paper]"}),
+            )
+            .unwrap();
+        let fid = id(&r);
+        let f = item(&s, fid);
+        let (code_it, finders) = (f.children()[0].clone(), f.children()[1].clone());
+        let gid = s
+            .edit(|d, _| {
+                d.remove_item(fid)?;
+                let lid = d.layers[0].id;
+                let mut bg =
+                    Item::new(ItemId(d.alloc()), lid, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(f.inner_bounds()));
+                bg.fill = designcraft_doc::Fill::swatch("[Paper]");
+                bg.qr_part = Some(QrPart::Background);
+                let mut g = Item::new(ItemId(d.alloc()), lid, designcraft_doc::Shape::Group, designcraft_geom::PathData::default());
+                g.content = Content::Group { items: vec![std::sync::Arc::new(bg), code_it.clone(), finders.clone()] };
+                Ok(d.insert_item(designcraft_doc::SpreadRef::Doc(0), g, None)?)
+            })
+            .unwrap();
+        let fields = super::edit_fields(&s.doc().unwrap().doc, gid).unwrap();
+        assert_eq!((fields["finderColor"].as_str(), fields["background"].as_str()), (Some("[Registration]"), Some("[Paper]")));
+        s.execute("selection.set", &json!({"ids": [gid.0]})).unwrap();
+        s.execute("object.qrCode", &json!({"content": "https://example.org"})).unwrap();
+        let g = item(&s, gid);
+        assert_eq!(g.children().len(), 1, "the group holds the code's frame alone");
+        let f = &g.children()[0];
+        assert_eq!(f.fill.swatch, "[Paper]");
+        let kinds: Vec<Option<QrPart>> = f.children().iter().map(|c| c.qr_part).collect();
+        assert_eq!(kinds, [None, Some(QrPart::Finders)], "code and finder patterns once each");
+
+        // A frame holding a background square and the code (Generate QR Code into a frame).
+        let mut s = new_doc();
+        let fr = s.execute("frame.create", &json!({"rect": [100, 100, 200, 200], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.qrCode", &json!({"content": "https://example.com", "background": "[Paper]"})).unwrap();
+        s.edit(|d, _| {
+            let lid = d.layers[0].id;
+            let f = d.item_mut(ItemId(fr)).unwrap();
+            let b = f.inner_bounds();
+            f.qr_part = None;
+            f.fill = designcraft_doc::Fill::none();
+            let mut bg = Item::new(ItemId(1_000_000), lid, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(b));
+            bg.fill = designcraft_doc::Fill::swatch("[Paper]");
+            bg.qr_part = Some(QrPart::Background);
+            f.children_mut().unwrap().insert(0, std::sync::Arc::new(bg));
+            Ok(())
+        })
+        .unwrap();
+        s.execute("selection.set", &json!({"ids": [fr]})).unwrap();
+        s.execute("object.qrCode", &json!({"content": "https://example.org"})).unwrap();
+        let f = item(&s, ItemId(fr));
+        assert_eq!((f.fill.swatch.as_str(), f.qr_part), ("[Paper]", Some(QrPart::Background)), "its square's colour moves to the frame");
+        assert_eq!(f.children().len(), 1);
     }
 
     /// Edit QR Code shows what a code holds: every type's fields come back from its text.

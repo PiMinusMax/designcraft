@@ -6060,6 +6060,11 @@ fn qr_style_ui(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
         colour(ui, d, "background", Some(&none));
         ui.end_row();
     });
+    let dim = crate::theme::Tokens::get(ui.ctx()).text_dim;
+    crate::rtl::label(
+        ui,
+        egui::RichText::new(tr("The code sits in a frame: its fill is the background, its stroke an outline. Select the code inside with Direct Selection to colour it with any tool.")).color(dim),
+    );
     egui::Grid::new("qr_style").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         crate::rtl::label(ui, tr("Error Correction:"));
         translated_combo(
@@ -6115,7 +6120,6 @@ fn qr_style_ui(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
         });
         ui.end_row();
     });
-    let dim = crate::theme::Tokens::get(ui.ctx()).text_dim;
     if d.n("logoSize").unwrap_or(0.0) > 0.0 && d.s("ecc") != "high" {
         crate::rtl::label(ui, egui::RichText::new(tr("A logo area needs High error correction to stay readable.")).color(dim));
     }
@@ -7537,8 +7541,9 @@ mod tests {
         ));
         let r = confirm(&mut app).unwrap();
         let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
-        // A paper background by default: the code's parts in a group.
+        // A paper background by default: the fill of the code's frame.
         let d = &app.session.doc().unwrap().doc;
+        assert_eq!(d.item(id).unwrap().fill.swatch, "[Paper]");
         let q = d.item(id).unwrap().children().iter().find_map(|c| c.qr).unwrap();
         use designcraft_geom::qr::{Ecc, Finder, Modules};
         assert_eq!((q.modules, q.finder, q.ecc), (Modules::Dots, Finder::Circle, Ecc::High));
