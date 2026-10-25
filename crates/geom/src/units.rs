@@ -198,8 +198,12 @@ pub fn decimal_comma(s: &str) -> String {
     c.iter()
         .enumerate()
         .map(|(i, &ch)| {
-            let after = c.iter().skip(i + 1).take_while(|d| d.is_ascii_digit()).count();
-            if ch == ',' && digit(i.checked_sub(1)) && digit(Some(i + 1)) && after != 3 { '.' } else { ch }
+            if ch != ',' || !digit(i.checked_sub(1)) || !digit(Some(i + 1)) {
+                return ch;
+            }
+            // Only whether exactly three digits follow: four are enough to tell.
+            let after = c.iter().skip(i + 1).take(4).take_while(|d| d.is_ascii_digit()).count();
+            if after != 3 { '.' } else { ch }
         })
         .collect()
 }
@@ -359,6 +363,11 @@ mod tests {
         assert!(parse_measure("5,", Unit::Points).is_err());
         // Before exactly three digits a comma may be English thousands: refused, not guessed.
         assert!(parse_measure("1,000", Unit::Points).is_err());
+        // Each comma looks at most four digits ahead: a very long number stays quick.
+        let long = format!("1,{}", "5".repeat(50_000));
+        let t = std::time::Instant::now();
+        assert_eq!(decimal_comma(&long).chars().nth(1), Some('.'));
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
         assert!(parse_measure("2,500 mm", Unit::Points).is_err());
         assert!((parse_measure("48,25", Unit::Points).unwrap() - 48.25).abs() < 1e-9);
     }
