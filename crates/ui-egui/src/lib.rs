@@ -171,6 +171,9 @@ pub struct SavedWorkspace {
     pub dock_expanded: bool,
     pub open_panel: Option<String>,
     pub floating: Vec<(String, [f32; 2])>,
+    /// Floating panel sizes (see [`UiState::panel_sizes`]); absent in older workspace files.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub panel_sizes: std::collections::BTreeMap<String, [f32; 2]>,
     /// Custom panel membership and placement; absent in older workspace files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docking: Option<craft_ui::docking::Layout<String>>,
@@ -244,6 +247,65 @@ impl Default for PdfExportSettings {
 /// The viewport of New Window's OS window, which shows pane 1.
 pub(crate) fn second_window_viewport() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("designcraft_second_window")
+}
+
+/// The application window as it was left (see [`UiState::window`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WindowState {
+    /// Its inner size when neither maximized nor full screen (logical points).
+    pub size: Option<[f32; 2]>,
+    pub maximized: bool,
+    pub fullscreen: bool,
+}
+
+impl WindowState {
+    /// The window as egui reports it this frame, over what was known (`self`): the size only
+    /// while it is an ordinary window, so restoring from maximized gets the size it had.
+    pub fn observe(self, vp: &egui::ViewportInfo) -> WindowState {
+        let maximized = vp.maximized.unwrap_or(self.maximized);
+        let fullscreen = vp.fullscreen.unwrap_or(self.fullscreen);
+        let size = match vp.inner_rect {
+            Some(r) if !maximized && !fullscreen && r.width().is_finite() && r.height().is_finite() && r.width() > 0.0 && r.height() > 0.0 => {
+                Some([r.width().round(), r.height().round()])
+            }
+            _ => self.size,
+        };
+        WindowState { size, maximized, fullscreen }
+    }
+
+    /// What to tell the window that just opened (`vp`) to be as it was left (`self`): maximized
+    /// or full screen when it isn't yet; else a size that fits the monitor ([`Self::fit`]).
+    pub fn restore(self, vp: &egui::ViewportInfo) -> Vec<egui::ViewportCommand> {
+        if self.fullscreen && vp.fullscreen != Some(true) {
+            return vec![egui::ViewportCommand::Fullscreen(true)];
+        }
+        if self.maximized && vp.maximized != Some(true) {
+            return vec![egui::ViewportCommand::Maximized(true)];
+        }
+        if self.fullscreen || self.maximized {
+            return Vec::new();
+        }
+        Self::fit(vp).into_iter().collect()
+    }
+
+    /// A window larger than the monitor it opened on (its size saved on a bigger screen): the size
+    /// that fits, with a margin for the desktop's own bars. None when it fits, or is maximized or
+    /// full screen (those follow the monitor).
+    pub fn fit(vp: &egui::ViewportInfo) -> Option<egui::ViewportCommand> {
+        let monitor = vp.monitor_size.filter(|m| m.x > 0.0 && m.y > 0.0)?;
+        if vp.maximized == Some(true) || vp.fullscreen == Some(true) {
+            return None;
+        }
+        let outer = vp.outer_rect.or(vp.inner_rect)?;
+        let inner = vp.inner_rect?;
+        let room = monitor * 0.92;
+        if outer.width() <= monitor.x && outer.height() <= monitor.y {
+            return None;
+        }
+        let deco = outer.size() - inner.size();
+        Some(egui::ViewportCommand::InnerSize((room - deco).max(egui::vec2(400.0, 300.0)).min(inner.size())))
+    }
 }
 
 /// Persisted UI state.
@@ -342,6 +404,13 @@ pub struct UiState {
     /// Its floating panels, and the float-only panels' windows (Type › Tabs): (panel id,
     /// top-left position). A customized layout holds its own floating panels.
     pub floating: Vec<(String, [f32; 2])>,
+    /// The size (width, height) each panel last floated at: it floats at that size again, after a
+    /// restart, docking and floating it, or a change of workspace.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub panel_sizes: std::collections::BTreeMap<String, [f32; 2]>,
+    /// The application window as it was left: its size, maximized, full screen. It opens so again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowState>,
     /// The panel layout once the user customizes it; `None` is the workspace's default layout
     /// (`panel_docking::default_layout`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,6 +572,8 @@ impl Default for UiState {
             dock_tab: "properties".into(),
             open_panel: None,
             floating: Vec::new(),
+            panel_sizes: Default::default(),
+            window: None,
             docking: None,
             docking_hidden: Default::default(),
             docking_generation: 0,
@@ -792,6 +863,9 @@ pub struct DesignApp {
     fonts_system: bool,
     pub restyle: bool,
     fonts_ready: bool,
+    /// The window was checked against its monitor after it opened (see [`WindowState::restore`]).
+    window_fitted: bool,
+    window_frames: u8,
     /// Files the operating system asked to open (macOS Finder, Dock, Open With), opened once the
     /// window is ready; see [`DesignApp::open_documents_later`].
     os_documents: Vec<String>,
@@ -929,6 +1003,8 @@ impl DesignApp {
             fonts_system: false,
             restyle: false,
             fonts_ready: false,
+            window_fitted: false,
+            window_frames: 0,
             os_documents: Vec::new(),
             integrated_titlebar: false,
             custom_titlebar: false,
@@ -2096,6 +2172,24 @@ impl DesignApp {
         self.canvas_ime = false;
         self.ime_canvas = None;
         self.ime_interrupt = false;
+        // Once the window shows: maximized or full screen again if it was left so (some window
+        // systems, Wayland among them, ignore that when the window is created), else made to fit
+        // a smaller monitor than the one its size was saved on.
+        // (Wayland may not say which monitor the window is on: after a few frames it goes ahead.)
+        self.window_frames = self.window_frames.saturating_add(1);
+        if !self.window_fitted && (ctx.input(|i| i.viewport().monitor_size.is_some()) || self.window_frames > 3) {
+            let saved = self.ui.window.unwrap_or_default();
+            let cmds = ctx.input(|i| saved.restore(i.viewport()));
+            for cmd in cmds {
+                log::info!("window: restoring {cmd:?}");
+                ctx.send_viewport_cmd(cmd);
+            }
+            self.window_fitted = true;
+        }
+        let window = ctx.input(|i| self.ui.window.unwrap_or_default().observe(i.viewport()));
+        if self.ui.window != Some(window) && window != WindowState::default() {
+            self.ui.window = Some(window);
+        }
         // Fonts/theme must be installed from the real UI pass, before the font gate below: doing
         // this only from a hidden logic tick would make the first shown pass wait forever.
         if ctx.current_pass_index() == 0 {
@@ -5293,5 +5387,59 @@ mod load_styles_tests {
         assert_eq!(app.session.active_index(), Some(0));
         assert_eq!(names(&app), (vec![], vec!["Lead".to_string()]));
         assert!(app.session.documents()[1].doc.styles.char_style("Lead").is_none());
+    }
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::WindowState;
+
+    fn vp(inner: [f32; 2], monitor: [f32; 2], maximized: bool) -> egui::ViewportInfo {
+        egui::ViewportInfo {
+            inner_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 30.0), egui::vec2(inner[0], inner[1]))),
+            outer_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(inner[0], inner[1] + 30.0))),
+            monitor_size: Some(egui::vec2(monitor[0], monitor[1])),
+            maximized: Some(maximized),
+            fullscreen: Some(false),
+            ..Default::default()
+        }
+    }
+
+    /// The window is remembered as left: the ordinary size, kept while it is maximized, so
+    /// restoring it gets that size back.
+    #[test]
+    fn the_window_is_remembered_as_left() {
+        let w = WindowState::default().observe(&vp([1200.0, 800.0], [1920.0, 1080.0], false));
+        assert_eq!(w, WindowState { size: Some([1200.0, 800.0]), maximized: false, fullscreen: false });
+        let max = w.observe(&vp([1920.0, 1050.0], [1920.0, 1080.0], true));
+        assert_eq!(max, WindowState { size: Some([1200.0, 800.0]), maximized: true, fullscreen: false });
+        // A file from before the window was kept loads without it.
+        let ui: super::UiState = serde_json::from_str("{}").unwrap();
+        assert!(ui.window.is_none() && ui.panel_sizes.is_empty());
+    }
+
+    /// A size saved on a bigger screen is made to fit a smaller one (or a lower resolution), so the
+    /// window never reaches past it; one that fits, or a maximized one, is left as it is.
+    #[test]
+    fn a_window_saved_on_a_bigger_screen_fits_a_smaller_one() {
+        let Some(egui::ViewportCommand::InnerSize(s)) = WindowState::fit(&vp([2400.0, 1400.0], [1366.0, 768.0], false)) else {
+            panic!("a command to fit")
+        };
+        assert!(s.x <= 1366.0 && s.y + 30.0 <= 768.0, "{s:?}");
+        assert!(WindowState::fit(&vp([1200.0, 700.0], [1366.0, 768.0], false)).is_none());
+        assert!(WindowState::fit(&vp([2400.0, 1400.0], [1366.0, 768.0], true)).is_none());
+    }
+
+    /// Left maximized (or full screen), the window is told so again once it shows, as Wayland
+    /// ignores it at creation; already so, nothing is sent.
+    #[test]
+    fn a_window_left_maximized_opens_maximized() {
+        let max = WindowState { size: Some([1200.0, 800.0]), maximized: true, fullscreen: false };
+        assert_eq!(max.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false)), vec![egui::ViewportCommand::Maximized(true)]);
+        assert!(max.restore(&vp([1920.0, 1050.0], [1920.0, 1080.0], true)).is_empty());
+        let full = WindowState { fullscreen: true, ..max };
+        assert_eq!(full.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false)), vec![egui::ViewportCommand::Fullscreen(true)]);
+        let plain = WindowState { size: Some([1200.0, 800.0]), ..Default::default() };
+        assert!(plain.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false)).is_empty());
     }
 }
