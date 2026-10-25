@@ -453,6 +453,9 @@ fn qr_code(s: &mut Session, p: &Value) -> Result<Value> {
                 let frame = d.item(fid).ok_or(designcraft_doc::DocError::NoItem(fid))?.clone();
                 let r = frame.inner_bounds();
                 let kids = frame.children();
+                // The code as it sits in the frame now: a code just moved into one has handed its
+                // transform to the frame, and must not keep it as well.
+                let c = kids.iter().find(|i| i.id == code_id).map_or(c, |i| (**i).clone());
                 let finders = kids.iter().find(|i| i.qr_part == Some(QrPart::Finders)).map(|i| (**i).clone());
                 let logo = kids.iter().find(|i| i.qr_part == Some(QrPart::Logo)).map(|i| (**i).clone());
                 let parts = qr_parts(d, c.layer, &text, r, &style, &colors, Some(&c), finders.as_ref()).map_err(|e| bad(ID, e))?;
@@ -820,6 +823,36 @@ mod tests {
         let f = item(&s, ItemId(fr));
         assert_eq!((f.fill.swatch.as_str(), f.qr_part), ("[Paper]", Some(QrPart::Background)), "its square's colour moves to the frame");
         assert_eq!(f.children().len(), 1);
+    }
+
+    /// A code made before codes had a frame, then moved and rotated with the tools, stays where
+    /// it is when edited: the frame takes its transform, and the code doesn't keep it as well.
+    #[test]
+    fn a_moved_and_rotated_code_from_before_stays_in_place_when_edited() {
+        let mut s = new_doc();
+        let r = designcraft_geom::Rect::new(100.0, 100.0, 200.0, 200.0);
+        let lone = lone_code(&mut s, "https://old.example", r, "[Black]");
+        let xf = designcraft_geom::Affine::translate((60.0, 40.0))
+            * designcraft_geom::Affine::rotate_about(0.3, designcraft_geom::Point::new(150.0, 150.0));
+        s.edit(|d, _| {
+            d.item_mut(lone).unwrap().xf = xf;
+            Ok(())
+        })
+        .unwrap();
+        // The code's symbol on the spread: its path through every transform above it.
+        let on_spread = |s: &Session| {
+            let d = &s.doc().unwrap().doc;
+            let loc = d.find(lone).unwrap();
+            let it = d.item(lone).unwrap();
+            (d.parent_xf(&loc) * it.xf).transform_rect_bbox(it.path.bounds().unwrap())
+        };
+        let before = on_spread(&s);
+        s.execute("selection.set", &json!({"ids": [lone.0]})).unwrap();
+        s.execute("object.qrCode", &json!({"content": "https://old.example"})).unwrap();
+        let after = on_spread(&s);
+        assert!((after.center() - before.center()).hypot() < 0.5, "{before:?} → {after:?}");
+        assert!((after.width() - before.width()).abs() < 0.5, "{before:?} → {after:?}");
+        assert_eq!(code(&s, lone).xf, designcraft_geom::Affine::IDENTITY, "the frame carries the transform");
     }
 
     /// Edit QR Code shows what a code holds: every type's fields come back from its text.

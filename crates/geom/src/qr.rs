@@ -137,9 +137,15 @@ const QUIET: i32 = 2;
 /// in `style`. `None` if the text is too long for any QR version at its error correction.
 pub fn qr_shapes(text: &str, r: Rect, style: &QrStyle) -> Option<QrShapes> {
     let style = style.sanitized();
+    // A rectangle given corner to corner the other way round is the same square; an empty or
+    // non-finite one holds no code.
+    let r = r.abs();
+    let side = r.width().min(r.height());
+    if !(side.is_finite() && side > 0.0) {
+        return None;
+    }
     let qr = qrcodegen::QrCode::encode_text(text, style.ecc.level()).ok()?;
     let n = qr.size();
-    let side = r.width().min(r.height());
     let m = side / (n + 2 * QUIET) as f64;
     let origin = Point::new(r.center().x - side / 2.0 + QUIET as f64 * m, r.center().y - side / 2.0 + QUIET as f64 * m);
     let cell =
@@ -252,7 +258,7 @@ pub fn qr_size(text: &str) -> Option<i32> {
 fn round_rect(r: Rect, radii: [f64; 4]) -> SubPath {
     // The handle length that makes a cubic quarter circle.
     const K: f64 = 0.552_284_749_830_793_4;
-    let max = r.width().min(r.height()) / 2.0;
+    let max = (r.width().min(r.height()) / 2.0).max(0.0);
     let [tl, tr, br, bl] = radii.map(|v| v.clamp(0.0, max));
     let mut a = Vec::with_capacity(8);
     let mut corner = |p: Point, rad: f64, from: kurbo::Vec2, to: kurbo::Vec2| {
@@ -417,5 +423,20 @@ mod tests {
     fn hostile_numbers_are_clamped() {
         let s = QrStyle { roundness: f64::NAN, scale: 9.0, logo: -1.0, ..Default::default() }.sanitized();
         assert_eq!((s.roundness, s.scale, s.logo), (1.0, 1.0, 0.0));
+    }
+
+    /// A rectangle given corner to corner the other way round makes the same code (it panicked
+    /// in `round_rect` for rounded modules); an empty or non-finite one makes none.
+    #[test]
+    fn a_reversed_rectangle_makes_the_same_code() {
+        for modules in [Modules::Square, Modules::Rounded, Modules::Dots, Modules::Connected] {
+            let style = QrStyle { modules, scale: 0.8, finder: Finder::Rounded, ..Default::default() };
+            let fwd = qr_shapes("https://example.com", Rect::new(100.0, 100.0, 200.0, 200.0), &style).unwrap();
+            let back = qr_shapes("https://example.com", Rect::new(200.0, 200.0, 100.0, 100.0), &style).unwrap();
+            assert_eq!(fwd, back, "{modules:?}");
+        }
+        for r in [Rect::new(5.0, 5.0, 5.0, 50.0), Rect::new(0.0, 0.0, f64::NAN, 9.0), Rect::new(0.0, 0.0, f64::INFINITY, f64::INFINITY)] {
+            assert!(qr_shapes("x", r, &QrStyle::default()).is_none(), "{r:?}");
+        }
     }
 }

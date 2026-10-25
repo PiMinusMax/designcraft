@@ -958,12 +958,23 @@ fn qr_section(app: &mut DesignApp, ui: &mut Ui, parts: designcraft_engine::cmd::
             t.text_dim,
         );
         let Some(name) = picked else { continue };
+        let corners_none = label == "Corner Patterns" && name == designcraft_color::swatch::NONE;
         match target {
+            // [None] for corner patterns of their own: back to the code's colour ("Same as Code"),
+            // rather than invisible patterns no scanner finds.
+            Some(_) if corners_none => {
+                if let Some(mut p) = designcraft_engine::cmd::qr::edit_fields(&doc, parts.code) {
+                    p["finderColor"] = json!("none");
+                    let _ = app.run("selection.set", json!({"ids": [parts.frame.unwrap_or(parts.code).0]}));
+                    let _ = app.run("object.qrCode", p);
+                }
+            }
             // An object of its own: filled as any object is.
             Some(id) => {
                 let _ = app.run("object.fill", json!({"ids": [id.0], "swatch": name}));
             }
             // Corner patterns with the code: they become an object of their own in that colour.
+            None if corners_none => {}
             None => {
                 if let Some(mut p) = designcraft_engine::cmd::qr::edit_fields(&doc, parts.code) {
                     p["finderColor"] = json!(name);
