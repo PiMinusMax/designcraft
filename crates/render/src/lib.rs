@@ -1018,9 +1018,12 @@ fn plate_part(
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
-    // All of it in view: the part is the whole plate, so convert it once and keep it, as long as
-    // it fits the cache at all. Converting it in parts would redo it on every render.
-    if (x0, y0, x1, y1) == (0, 0, w, h) && plate_bytes(w, h) <= PLATE_CACHE_BYTES {
+    // All or nearly all of it in view (three quarters or more): convert the whole plate once and
+    // keep it, as long as it fits the cache at all. Converting it in parts would redo nearly all
+    // of it on every render.
+    let part_area = u64::from(x1 - x0) * u64::from(y1 - y0);
+    let whole_area = u64::from(w) * u64::from(h);
+    if part_area.saturating_mul(4) >= whole_area.saturating_mul(3) && plate_bytes(w, h) <= PLATE_CACHE_BYTES {
         return Some((plate_pixmap(pm, plate), (0, 0)));
     }
     let row = usize::from(w);
@@ -1719,6 +1722,11 @@ mod tests {
             assert_eq!(((whole.width(), whole.height()), at), ((4000, 2500), (0, 0)));
         }
         assert_eq!(PLATE_CONVERSIONS.with(std::cell::Cell::get) - before, 1, "the whole plate is converted once and cached");
+        // Nearly all of it in view (90 % of the width): the cached whole plate, not a new part.
+        let before = PLATE_CONVERSIONS.with(std::cell::Cell::get);
+        let (whole, at) = plate_part(&pm, 4, Affine::IDENTITY, || Rect::new(200.0, -10.0, 3800.0, 2510.0)).unwrap();
+        assert_eq!(((whole.width(), whole.height()), at), ((4000, 2500), (0, 0)));
+        assert_eq!(PLATE_CONVERSIONS.with(std::cell::Cell::get), before, "taken from the cache");
         let small = ramp(64, 64);
         let (whole, at) = plate_part(&small, 3, Affine::IDENTITY, || Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
         assert_eq!(((whole.width(), whole.height()), at), ((64, 64), (0, 0)), "a small image is converted whole and cached");
