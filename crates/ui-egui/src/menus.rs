@@ -3505,6 +3505,8 @@ pub fn quick_apply_items(session: &designcraft_engine::Session, query: &str, cjk
 /// dialog to ask for it, or without one they reset a setting. Each stays in the menu, panel or
 /// dialog that gives it the value (the workspace menus, Keyboard Shortcuts, Preferences…).
 const NOT_SEARCHED: &[&str] = &[
+    // The link to show: the Links panel names it.
+    "links.reveal",
     // The workspace to switch to or delete.
     "window.workspace",
     "window.deleteWorkspace",

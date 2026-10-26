@@ -2686,7 +2686,7 @@ fn link_row(ui: &mut egui::Ui, r: &Value, selected: bool, t: &Tokens) -> egui::R
     let status = r["status"].as_str().unwrap_or("");
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), LINK_ROW_H), Sense::click());
     // Named by the file, for screen readers and UI tests.
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, name));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, name));
     let p = ui.painter_at(rect);
     if selected {
         p.rect_filled(rect, 0.0, t.row_selected);
@@ -2801,7 +2801,7 @@ pub fn links_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     }
 
     // Summary: how many files, how many need attention; the search field filters by name or path.
-    let filter_key = egui::Id::new("links_panel_filter");
+    let filter_key = egui::Id::unique("links_panel_filter");
     let (mut searching, mut filter): (bool, String) = ui.data(|d| d.get_temp(filter_key)).unwrap_or_default();
     let count = |s: &str| rows.iter().filter(|r| r["status"] == s).count();
     let (modified, missing) = (count("modified"), count("missing"));
@@ -2841,7 +2841,7 @@ pub fn links_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         .collect();
 
     // The chosen link: the last one clicked, else the first.
-    let sel_key = egui::Id::new("links_panel_sel");
+    let sel_key = egui::Id::unique("links_panel_sel");
     let chosen: Option<u64> = ui.data(|d| d.get_temp(sel_key));
     let mut chosen = chosen.filter(|c| rows.iter().any(|r| link_id(r) == *c)).or_else(|| rows.first().map(link_id));
     let mut action: Option<LinkAction> = None;

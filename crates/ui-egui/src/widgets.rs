@@ -616,7 +616,7 @@ pub fn icon_text_button(ui: &mut Ui, icon: &str, text: &str) -> Response {
     ui.painter().rect(r, f32::from(t.radius), visuals.weak_bg_fill, visuals.bg_stroke, StrokeKind::Inside);
     crate::icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 15.0, r.center().y), vec2(14.0, 14.0)), icon, color);
     ui.painter().galley(pos2(r.min.x + 27.0, r.center().y - galley.size().y / 2.0), galley, color);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     resp
 }
 
@@ -628,7 +628,7 @@ pub fn icon_frame_button(ui: &mut Ui, icon: &str, tip: &str) -> Response {
     let visuals = ui.style().interact(&resp);
     ui.painter().rect(r, f32::from(t.radius), visuals.weak_bg_fill, visuals.bg_stroke, StrokeKind::Inside);
     crate::icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(15.0, 15.0)), icon, if enabled { t.text } else { t.text_disabled });
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
     resp.on_hover_text(tip)
 }
 
