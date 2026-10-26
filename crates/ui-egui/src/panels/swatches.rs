@@ -455,30 +455,30 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             let _ = super::apply_swatch(app, stroke, &sw.name, Some(v / 100.0));
         }
     }
+    let mut edit = Edit::None;
     let mut send: Option<serde_json::Value> = None;
     match mode {
         ColorMode::Cmyk => {
             let mut v = c.to_cmyk();
-            let mut done = false;
             for (k, label) in ["C", "M", "Y", "K"].iter().enumerate() {
-                done |= channel(ui, label, &mut v[k], 100.0, "%", |x| cmyk_ramp(k, x));
+                edit = edit.max(channel(ui, label, &mut v[k], 100.0, "%", |x| cmyk_ramp(k, x)));
             }
-            if done {
-                send = Some(json!({"model": "cmyk", "c": v[0], "m": v[1], "y": v[2], "k": v[3]}));
-            }
+            send = Some(json!({"model": "cmyk", "c": v[0], "m": v[1], "y": v[2], "k": v[3]}));
         }
         ColorMode::Rgb => {
             let mut v = c.to_rgb();
-            let mut done = false;
             for (k, label) in ["R", "G", "B"].iter().enumerate() {
-                done |= channel(ui, label, &mut v[k], 255.0, "", |x| {
+                edit = edit.max(channel(ui, label, &mut v[k], 255.0, "", |x| {
                     let mut p = [0.0; 3];
                     p[k] = x;
                     egui::Color32::from_rgb((p[0] * 255.0) as u8, (p[1] * 255.0) as u8, (p[2] * 255.0) as u8)
-                });
+                }));
             }
-            if done {
-                send = Some(json!({"model": "rgb", "r": v[0], "g": v[1], "b": v[2]}));
+            send = Some(json!({"model": "rgb", "r": v[0], "g": v[1], "b": v[2]}));
+            if let Some(typed) = hex_field(app, ui, &c) {
+                let [r, g, b] = typed.to_rgb();
+                send = Some(json!({"model": "rgb", "r": r, "g": g, "b": b}));
+                edit = Edit::Applied;
             }
         }
         ColorMode::Lab => {
@@ -487,7 +487,7 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         }
     }
     if let Some(color) = send {
-        let _ = app.run("object.color", json!({"color": color, "target": target, "text": text}));
+        apply_edit(app, edit, json!({"color": color, "target": target, "text": text}));
     }
     spectrum(app, ui, target);
     ui.horizontal(|ui| {
@@ -517,10 +517,77 @@ pub(crate) fn picker_fields(color: Option<designcraft_color::Color>, stroke: boo
     f
 }
 
-/// One slider with a gradient track of the channel and a value field. True when it was changed
-/// (on release, or when a typed value is committed by Enter or leaving the field).
-fn channel(ui: &mut egui::Ui, label: &str, v: &mut f32, scale: f32, suffix: &str, ramp: impl Fn(f32) -> egui::Color32) -> bool {
-    let mut changed = false;
+/// What a control of the Color panel did this frame, in rising order: the strongest of several
+/// controls decides (see [`apply_edit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Edit {
+    None,
+    /// Pressed, not moved this frame.
+    Held,
+    /// Dragged to a new value: shown as a live preview.
+    Live,
+    /// A click, or a typed value committed.
+    Applied,
+}
+
+impl Edit {
+    /// What the pointer did on a track or ramp this frame.
+    fn of(resp: &egui::Response) -> Edit {
+        if resp.clicked() {
+            Edit::Applied
+        } else if resp.dragged() && resp.drag_delta() != egui::Vec2::ZERO {
+            Edit::Live
+        } else if resp.is_pointer_button_down_on() {
+            Edit::Held
+        } else {
+            Edit::None
+        }
+    }
+}
+
+/// Send `object.color` with `params` as `edit` asks: a drag previews it live (one undo step once
+/// let go, see [`DesignApp::live_preview`]), a click or typed value applies it.
+fn apply_edit(app: &mut DesignApp, edit: Edit, params: serde_json::Value) {
+    match edit {
+        Edit::None => {}
+        Edit::Held => app.hold_live_preview(),
+        Edit::Live => app.live_preview("Color", "object.color", params),
+        Edit::Applied => {
+            app.end_live_preview();
+            let _ = app.run("object.color", params);
+        }
+    }
+}
+
+/// The RGB mode's hex field: the colour typed, once Enter or leaving the field commits it (Escape
+/// drops it). The text lives here while the field has focus, because the colour is read back from
+/// the document every frame.
+fn hex_field(app: &DesignApp, ui: &mut egui::Ui, c: &designcraft_color::Color) -> Option<designcraft_color::Color> {
+    let mut typed = None;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("#").monospace());
+        let id = ui.scope_id().with("color_hex");
+        let shown = c.to_hex().trim_start_matches('#').to_string();
+        let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.clone());
+        let field = ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(64.0).char_limit(7).font(egui::TextStyle::Monospace))
+            .accessible_name(crate::i18n::tr(&app.ui.language, "Hex"));
+        if field.has_focus() {
+            ui.data_mut(|d| d.insert_temp(id, text));
+        } else {
+            ui.data_mut(|d| d.remove::<String>(id));
+            if field.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape)) && text != shown {
+                typed = designcraft_color::Color::from_hex(&text);
+            }
+        }
+    });
+    typed
+}
+
+/// One slider with a gradient track of the channel and a value field: dragging the track previews
+/// the value live, a click on it or a value typed (Enter or leaving the field) applies it.
+fn channel(ui: &mut egui::Ui, label: &str, v: &mut f32, scale: f32, suffix: &str, ramp: impl Fn(f32) -> egui::Color32) -> Edit {
+    let mut edit = Edit::None;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).monospace());
         let w = (ui.available_width() - 60.0).max(60.0);
@@ -542,7 +609,7 @@ fn channel(ui: &mut egui::Ui, label: &str, v: &mut f32, scale: f32, suffix: &str
         if let Some(p) = resp.interact_pointer_pos() {
             *v = ((p.x - track.min.x) / track.width()).clamp(0.0, 1.0);
         }
-        changed |= resp.drag_stopped() || resp.clicked();
+        edit = Edit::of(&resp);
         // The value is applied when typing ends or a drag stops; until then the field's number
         // lives here, because `v` is read back from the document every frame.
         let pending_id = ui.scope_id().with(("channel", label));
@@ -556,11 +623,11 @@ fn channel(ui: &mut egui::Ui, label: &str, v: &mut f32, scale: f32, suffix: &str
             ui.data_mut(|d| d.remove::<f32>(pending_id));
             if field.changed() || field.drag_stopped() {
                 *v = num / scale;
-                changed = true;
+                edit = Edit::Applied;
             }
         }
     });
-    changed
+    edit
 }
 
 fn cmyk_ramp(k: usize, x: f32) -> egui::Color32 {
@@ -570,9 +637,37 @@ fn cmyk_ramp(k: usize, x: f32) -> egui::Color32 {
     egui::Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
-/// The spectrum ramp: hue across, light to dark down; click to apply.
+/// The spectrum ramp: hue across, light to dark down; a click applies the colour under the
+/// pointer, a drag previews it live. Left of it, None, White and Black.
 fn spectrum(app: &mut DesignApp, ui: &mut egui::Ui, target: &str) {
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let text = super::colors_affect_text(app);
+    let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    let side = full.height() / 3.0;
+    let white = json!({"model": "cmyk", "c": 0.0, "m": 0.0, "y": 0.0, "k": 0.0});
+    let black = json!({"model": "cmyk", "c": 0.0, "m": 0.0, "y": 0.0, "k": 1.0});
+    for (k, (tip, color)) in [("None", None), ("White", Some(white)), ("Black", Some(black))].into_iter().enumerate() {
+        let chip = egui::Rect::from_min_size(egui::pos2(full.min.x, full.min.y + side * k as f32), vec2(side, side)).shrink(1.0);
+        let resp = ui.interact(chip, ui.scope_id().with(("ramp_chip", k)), Sense::click());
+        let fill = match k {
+            1 => Some(egui::Color32::WHITE),
+            2 => Some(egui::Color32::BLACK),
+            _ => None,
+        };
+        crate::widgets::paint_chip(ui.painter(), chip, fill, None);
+        ui.painter().rect_stroke(chip, 0.0, egui::Stroke::new(1.0, Tokens::get(ui.ctx()).border), egui::StrokeKind::Inside);
+        let tip = crate::i18n::tr(&app.ui.language, tip);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+        if resp.on_hover_text(tip).clicked() {
+            app.end_live_preview();
+            let stroke = target == "stroke";
+            let _ = match color {
+                Some(color) => app.run("object.color", json!({"color": color, "target": target, "text": text})),
+                None => super::apply_swatch(app, stroke, designcraft_color::swatch::NONE, None),
+            };
+        }
+    }
+    let r = egui::Rect::from_min_max(egui::pos2(full.min.x + side + 2.0, full.min.y), full.max);
+    let resp = ui.interact(r, ui.scope_id().with("ramp"), Sense::click_and_drag());
     let at = |u: f32, v: f32| -> [f32; 3] {
         let c = egui::ecolor::Hsva::new(u, (v * 2.0).min(1.0), (2.0 - v * 2.0).min(1.0), 1.0).to_rgb();
         [c[0], c[1], c[2]]
@@ -588,13 +683,11 @@ fn spectrum(app: &mut DesignApp, ui: &mut egui::Ui, target: &str) {
             ui.painter().rect_filled(cell, 0.0, egui::Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8));
         }
     }
-    if resp.clicked()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
+    let edit = Edit::of(&resp);
+    if let Some(p) = resp.interact_pointer_pos().filter(|_| edit != Edit::None) {
         let c = at(((p.x - r.min.x) / r.width()).clamp(0.0, 1.0), ((p.y - r.min.y) / r.height()).clamp(0.0, 1.0));
-        let text = super::colors_affect_text(app);
         let q = |v: f32| (v * 255.0).round() / 255.0;
-        let _ = app.run("object.color", json!({"color": {"model": "rgb", "r": q(c[0]), "g": q(c[1]), "b": q(c[2])}, "target": target, "text": text}));
+        apply_edit(app, edit, json!({"color": {"model": "rgb", "r": q(c[0]), "g": q(c[1]), "b": q(c[2])}, "target": target, "text": text}));
     }
 }
 
@@ -1187,6 +1280,108 @@ mod color_panel_tests {
         h.run_steps(2);
         let designcraft_color::Color::Cmyk { c, m, y, k } = fill(h.state(), id) else { panic!("not CMYK") };
         assert!(c == 0.0 && (m - 0.01).abs() < 1e-6 && (y - 1.0).abs() < 1e-6 && k == 0.0, "{c} {m} {y} {k}");
+    }
+
+    fn undo_steps(app: &DesignApp) -> usize {
+        app.session.active().unwrap().history.undo.len()
+    }
+
+    /// A frame with a CMYK fill, selected, and the Color panel showing it in `mode`. Each frame
+    /// settles the live preview first, as `DesignApp::ui` does.
+    fn panel(mode: super::ColorMode) -> (Harness<'static, DesignApp>, u64) {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [36, 36, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        app.run("selection.set", json!({"ids": [id]})).unwrap();
+        app.run("object.color", json!({"color": {"c": 0, "m": 50, "y": 100, "k": 0}})).unwrap();
+        let h = Harness::builder().with_size(vec2(320.0, 300.0)).build_ui_state(
+            move |ui, app: &mut DesignApp| {
+                let set = egui::Id::unique("test_mode_set");
+                if ui.data(|d| d.get_temp::<bool>(set)).is_none() {
+                    ui.data_mut(|d| {
+                        d.insert_temp(set, true);
+                        d.insert_temp(egui::Id::unique("color_panel_mode"), mode);
+                    });
+                }
+                app.settle_live_preview();
+                super::color_panel(app, ui);
+            },
+            app,
+        );
+        (h, id)
+    }
+
+    /// RGB mode has a hex field: a value typed there applies on Enter, as one undo step.
+    #[test]
+    fn a_hex_value_typed_in_rgb_mode_applies_on_enter() {
+        let (mut h, id) = panel(super::ColorMode::Rgb);
+        h.run_steps(3);
+        let steps = undo_steps(h.state());
+        h.get_by_label("Hex").click();
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text("1080ff".into()));
+        h.run_steps(2);
+        assert!(matches!(fill(h.state(), id), designcraft_color::Color::Cmyk { .. }), "nothing is applied while typing");
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(fill(h.state(), id).to_hex(), "#1080ff");
+        assert_eq!(undo_steps(h.state()), steps + 1);
+    }
+
+    /// Dragging over the spectrum shows each colour on the page as it goes, and letting go keeps
+    /// the last one as a single undo step.
+    #[test]
+    fn a_drag_over_the_spectrum_previews_live_and_is_one_undo_step() {
+        use egui::{Event, Modifiers, PointerButton};
+        let (mut h, id) = panel(super::ColorMode::Cmyk);
+        h.run_steps(3);
+        let steps = undo_steps(h.state());
+        let before = fill(h.state(), id);
+        // The ramp starts right of the None / White / Black column.
+        let white = h.get_by_label("White").rect();
+        let y = white.center().y;
+        let from = egui::pos2(white.right() + 40.0, y);
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        let mut seen = Vec::new();
+        for i in 1..=6 {
+            h.event(Event::PointerMoved(egui::pos2(from.x + 25.0 * i as f32, y)));
+            h.step();
+            seen.push(fill(h.state(), id).to_hex());
+        }
+        assert_ne!(fill(h.state(), id), before, "the page shows the colour under the pointer");
+        seen.dedup();
+        assert!(seen.len() > 2, "the colour follows the drag: {seen:?}");
+        assert_eq!(undo_steps(h.state()), steps, "nothing is undoable while dragging");
+        let last = fill(h.state(), id);
+        let to = egui::pos2(from.x + 150.0, y);
+        h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        assert_eq!(undo_steps(h.state()), steps + 1, "one undo step once let go");
+        assert_eq!(fill(h.state(), id), last);
+    }
+
+    /// None, White and Black sit beside the spectrum, and stay there with no colour applied.
+    #[test]
+    fn none_white_and_black_beside_the_spectrum() {
+        let (mut h, id) = panel(super::ColorMode::Cmyk);
+        h.run_steps(3);
+        h.get_by_label("None").click();
+        h.run_steps(2);
+        let swatch = |h: &Harness<'static, DesignApp>| {
+            let d = &h.state().session.active().unwrap().doc;
+            d.item(designcraft_doc::ItemId(id)).unwrap().fill.swatch.clone()
+        };
+        assert_eq!(swatch(&h), designcraft_color::swatch::NONE);
+        h.get_by_label("White").click();
+        h.run_steps(2);
+        assert_eq!(fill(h.state(), id), designcraft_color::Color::cmyk(0.0, 0.0, 0.0, 0.0));
+        h.get_by_label("Black").click();
+        h.run_steps(2);
+        assert_eq!(fill(h.state(), id), designcraft_color::Color::cmyk(0.0, 0.0, 0.0, 1.0));
     }
 }
 

@@ -12,6 +12,9 @@
 
 DesignCraft aims at full Adobe InDesign parity — and to be better: faster, open (documented JSON format + IDML), scriptable by agents (MCP), and available on the web.
 
+- **2026-10-26** · The Color panel takes a hex value in RGB mode, has None, White and Black
+  beside the spectrum, and shows a colour live while the spectrum or a channel slider is dragged
+  (one undo step once let go). No readiness percentage change.
 - **2026-10-25** · The application bar uses craft-window's shared title-bar code. A drag that
   starts on a floating panel over the bar moves the panel, not the window, and in full screen the
   bar no longer zooms or moves the window. No readiness percentage change.
