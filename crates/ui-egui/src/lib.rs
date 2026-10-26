@@ -2813,6 +2813,7 @@ mod tests {
 
     /// The timed recovery save is written on its own thread: the frame that starts it doesn't
     /// wait for it, and a later frame records it.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_timed_recovery_save_is_written_on_its_own_thread() {
         let ctx = egui::Context::default();
@@ -2836,6 +2837,7 @@ mod tests {
 
     /// A recovery save by command while the timed one is being written waits for it, so the
     /// command's newer snapshot is the one left on disk.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_recovery_save_by_command_waits_for_the_timed_one() {
         let ctx = egui::Context::default();
