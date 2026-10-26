@@ -1751,6 +1751,9 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Black", "Schwarz"),
     ("White", "Weiß"),
     ("Hex", "Hex"),
+    ("Text Fill", "Textfläche"),
+    ("Text Stroke", "Textkontur"),
+    ("Stroke:", "Kontur:"),
     // Document Setup
     ("Page Size:", "Seitenformat:"),
     ("Inside:", "Innen:"),
