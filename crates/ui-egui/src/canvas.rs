@@ -1912,12 +1912,12 @@ fn draw_inverse_highlight(
             (((c.x - sh.origin.x) * k).round() as i64, ((c.y - sh.origin.y) * k).round() as i64, px)
         });
     let at = from_canvas.as_ref().map(|(x, y, _)| (*x, *y));
-    let key = egui::Id::new(("inverse_sel", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, story.0))
+    let key = egui::Id::unique(("inverse_sel", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, story.0))
         .with(&display)
-        .with((runs.iter().map(|r| r.2.len() + r.3.len() * 7919).sum::<usize>(), w, h, preview))
+        .with((runs.iter().map(|r| r.1.len()).sum::<usize>(), w, h, preview))
         .with((at, app.canvas.pixels_generation, xf.zoom.to_bits(), xf.rot, st.selection.text.map(|t| (t.anchor, t.focus))))
         .with(at.is_none().then(|| (bbox.min.x.to_bits(), bbox.min.y.to_bits())));
-    let cache_id = egui::Id::new("inverse_sel_tex");
+    let cache_id = egui::Id::unique("inverse_sel_tex");
     let cached: Option<(egui::Id, egui::TextureHandle)> = ctx.data(|d| d.get_temp(cache_id));
     let tex = match cached {
         Some((k, t)) if k == key => t,
@@ -4319,7 +4319,7 @@ mod tests {
         let mut h = crate::test_window::open(app, vec2(900.0, 600.0));
         h.run_steps(6);
         let cached = |h: &Harness<'_, crate::test_window::Window>| {
-            h.ctx.data(|d| d.get_temp::<(egui::Id, egui::TextureHandle)>(egui::Id::new("inverse_sel_tex"))).map(|(k, _)| k)
+            h.ctx.data(|d| d.get_temp::<(egui::Id, egui::TextureHandle)>(egui::Id::unique("inverse_sel_tex"))).map(|(k, _)| k)
         };
         let before = cached(&h).expect("the highlight is drawn");
         h.run_steps(2);
