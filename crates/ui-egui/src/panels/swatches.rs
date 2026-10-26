@@ -1095,7 +1095,7 @@ pub fn gradient_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
                 egui::ComboBox::from_id_salt("grad_stop_swatch").selected_text(crate::rtl::widget(ui, current)).width(120.0).show_ui(ui, |ui| {
                     for (name, c) in &colors {
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width().max(140.0), 20.0), Sense::click());
-                        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, *c == s.color, *name));
+                        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, *c == s.color, *name));
                         if resp.hovered() {
                             ui.painter().rect_filled(r, 0.0, t.hover);
                         }

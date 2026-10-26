@@ -1927,7 +1927,6 @@ fn draw_inverse_highlight(
     let display = (
         format!("{:?}", display_key(app)),
         app.ui.proof_colors.then(|| format!("{:?}", app.ui.proof_setup)),
-        app.ui.ink_limit.map(f32::to_bits),
         back.to_array(),
     );
     // What the canvas shows under the highlight: cut from the canvas's own pixels when its texture
@@ -1943,7 +1942,7 @@ fn draw_inverse_highlight(
     let at = from_canvas.as_ref().map(|(x, y, _)| (*x, *y));
     let key = egui::Id::unique(("inverse_sel", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, story.0))
         .with(&display)
-        .with((runs.iter().map(|r| r.2.len() + r.3.len() * 7919).sum::<usize>(), w, h, preview))
+        .with((runs.iter().map(|r| r.1.len()).sum::<usize>(), w, h, preview))
         .with((at, app.canvas.pixels_generation, xf.zoom.to_bits(), xf.rot, st.selection.text.map(|t| (t.anchor, t.focus))))
         .with(at.is_none().then(|| (bbox.min.x.to_bits(), bbox.min.y.to_bits())));
     let cache_id = egui::Id::unique("inverse_sel_tex");
@@ -1990,9 +1989,6 @@ fn draw_inverse_highlight(
                     });
                     if app.ui.proof_colors {
                         designcraft_render::proof_view(&mut under, &app.ui.proof_setup);
-                    }
-                    if app.ui.separation.is_none() && app.ui.ink_limit.is_some() {
-                        designcraft_render::separation_view(&mut under, None, app.ui.ink_limit);
                     }
                     under.pixels
                 }

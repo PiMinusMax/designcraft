@@ -2779,7 +2779,7 @@ fn link_row(ui: &mut egui::Ui, r: &Value, selected: bool, t: &Tokens) -> egui::R
     let status = r["status"].as_str().unwrap_or("");
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), LINK_ROW_H), Sense::click());
     // Named by the file, for screen readers and UI tests.
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, name));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, name));
     let p = ui.painter_at(rect);
     if selected {
         p.rect_filled(rect, 0.0, t.row_selected);
@@ -3350,27 +3350,6 @@ pub fn effects_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             }
         });
     }
-}
-
-/// The Effects panel's add-effect button: "fx" in text size with a menu triangle (as a 20 pt
-/// icon it was drawn about 7 px high, hard to read).
-fn fx_menu_button(ui: &mut egui::Ui, tip: &str) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let (r, resp) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::click());
-    if resp.hovered() || resp.is_pointer_button_down_on() {
-        ui.painter().rect_filled(r, 3.0, t.hover);
-    }
-    let font = egui::FontId::new(15.0, egui::FontFamily::Proportional);
-    let galley = ui.painter().layout_no_wrap("fx".into(), font, t.icon);
-    let at = egui::pos2(r.min.x + 5.0, r.center().y - galley.size().y / 2.0);
-    ui.painter().galley(at, galley, t.icon);
-    let tri = [egui::pos2(r.max.x - 11.0, r.center().y - 1.5), egui::pos2(r.max.x - 4.0, r.center().y - 1.5), egui::pos2(r.max.x - 7.5, r.center().y + 2.5)];
-    ui.painter().add(egui::Shape::convex_polygon(tri.to_vec(), t.icon, Stroke::NONE));
-    let enabled = ui.is_enabled();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "fx"));
-    resp.on_hover_ui(|ui| {
-        crate::rtl::label(ui, tip);
-    })
 }
 
 pub fn preflight_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
