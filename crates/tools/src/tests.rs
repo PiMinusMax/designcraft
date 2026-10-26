@@ -194,6 +194,33 @@ fn gradient_tool_drag_sets_the_vector() {
     assert_eq!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, 220.0 + off.x, 153.0 + off.y)), vec![Action::Commit]);
 }
 
+/// With text selected, the Gradient Swatch tool sets where the text's gradient runs
+/// (`type.gradient`), not the frame's fill.
+#[test]
+fn gradient_tool_on_selected_text_sets_the_texts_gradient() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (fid, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 300.0, 200.0), lid, "Hello", ParaFormat::default()).unwrap();
+    let s = Selection {
+        items: vec![fid],
+        text: Some(designcraft_doc::TextSel { story: sid, anchor: 0, focus: 5, frame: Some(fid), cell: None }),
+        ..Default::default()
+    };
+    let (c, l) = (Cache::new(), CanvasLayout::new(&d, false));
+    let cx = ctx(&d, &s, &c, &l);
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let mut t = create("gradientSwatch");
+    assert_eq!(t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 120.0 + off.x, 150.0 + off.y)), vec![Action::Begin("Gradient".into())]);
+    match &t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 220.0 + off.x, 150.0 + off.y))[0] {
+        Action::Preview(cmd, p) => {
+            assert_eq!(cmd, "type.gradient");
+            assert_eq!((p["from"].clone(), p["to"].clone()), (serde_json::json!([120.0, 150.0]), serde_json::json!([220.0, 150.0])));
+            assert!(p.get("ids").is_none());
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn gradient_tool_drag_follows_a_rotated_spread() {
     let mut d = Document::new(&NewDocument::default());

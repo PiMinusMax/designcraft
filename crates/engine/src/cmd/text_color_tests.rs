@@ -179,3 +179,33 @@ fn integration_color_swap_validates_new_fill_before_any_edit() {
     assert_eq!(s.doc().unwrap().history.undo.len(), before.history.undo.len());
     assert_eq!(s.journal, journal);
 }
+
+/// The Gradient Swatch tool on selected text sets the characters' gradient vector, in the text
+/// space of their frame, and leaves the frame's fill alone; reset lays it across the frame again.
+#[test]
+fn a_gradient_dragged_across_selected_text_sets_the_texts_vector() {
+    let (mut s, sid) = setup("hello world");
+    let frame = s.doc().unwrap().doc.story(designcraft_doc::StoryId(sid)).unwrap().frames[0];
+    // The frame moved: the vector is in its text space, not the spread's.
+    s.execute("transform.move", &json!({"ids": [frame.0], "dx": 100, "dy": 50})).unwrap();
+    s.execute("text.select", &json!({"story":sid,"anchor":0,"focus":5})).unwrap();
+    let frame_fill = s.doc().unwrap().doc.item(frame).unwrap().fill.clone();
+    s.execute("type.gradient", &json!({"from": [146, 100], "to": [246, 100]})).unwrap();
+    let a = attrs(&mut s);
+    let v: Vec<f64> = a["fillGradient"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+    let d = &s.doc().unwrap().doc;
+    let it = d.item(frame).unwrap();
+    let to_text = (d.parent_xf(&d.find(frame).unwrap()) * d.text_xf(it)).inverse();
+    let (a0, b0) = (to_text * designcraft_geom::Point::new(146.0, 100.0), to_text * designcraft_geom::Point::new(246.0, 100.0));
+    assert!((v[0] - a0.x).abs() < 1e-6 && (v[2] - b0.x).abs() < 1e-6 && (v[1] - a0.y).abs() < 1e-6, "{v:?}");
+    assert_eq!(d.item(frame).unwrap().fill, frame_fill, "the frame's fill is untouched");
+    // Only the selected characters.
+    s.execute("text.select", &json!({"story":sid,"anchor":7,"focus":9})).unwrap();
+    assert!(attrs(&mut s)["fillGradient"].is_null());
+    // Reset, and refusals.
+    s.execute("text.select", &json!({"story":sid,"anchor":0,"focus":5})).unwrap();
+    s.execute("type.gradient", &json!({"reset": true})).unwrap();
+    assert!(attrs(&mut s)["fillGradient"].is_null());
+    assert!(s.execute("type.gradient", &json!({"from": [1, 1], "to": [1, 1]})).is_err());
+    assert!(s.execute("type.gradient", &json!({})).is_err());
+}
