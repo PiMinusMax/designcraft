@@ -1709,6 +1709,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("A, B, C, D...", "A, B, C, D..."),
     ("Alpha Channel", "Alphakanal"),
     ("Black", "Schwarz"),
+    ("White", "Weiß"),
+    ("Hex", "Hex"),
     // Document Setup
     ("Page Size:", "Seitenformat:"),
     ("Inside:", "Innen:"),
