@@ -47,9 +47,15 @@ impl Tool for GradientTool {
                     cx.selection.items.iter().map(|i| i.0).collect()
                 };
                 let Some((spread, sp)) = cx.layout.spread_at(ev.pos) else { return vec![] };
-                // Selected text: its own gradient (a fill gradient; feathering is the frame's).
-                let ids = if cx.selection.text.is_some() && !self.feather { Vec::new() } else { ids };
-                if ids.is_empty() && (cx.selection.text.is_none() || self.feather) {
+                // Selected text, or with Formatting Affects Text the text of the selected text
+                // frames: its own gradient (a fill gradient; feathering is the frame's).
+                let text = !self.feather
+                    && (cx.selection.text.is_some()
+                        || (cx.affects_text
+                            && !cx.selection.items.is_empty()
+                            && cx.selection.items.iter().all(|i| cx.doc.item(*i).is_some_and(|it| it.is_text_frame()))));
+                let ids = if text { Vec::new() } else { ids };
+                if ids.is_empty() && !text {
                     return vec![];
                 }
                 self.drag = Some((ev.pos, sp, ids, spread));

@@ -183,8 +183,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "Gradient",
             [],
             None,
-            "{from: [x,y], to: [x,y] (spread coords: the Gradient Swatch tool's drag), reset?: bool} — where the selected text's gradient fill starts and ends (reset: across the frame again); sets the character attribute fillGradient",
-            super::has_text,
+            "{from: [x,y], to: [x,y] (spread coords: the Gradient Swatch tool's drag), reset?: bool} — where the selected text's gradient fill starts and ends (reset: across the frame again); sets the character attribute fillGradient. With text frames selected instead, their whole text",
+            super::has_text_or_frames,
             text_gradient
         ),
         cmd!(
@@ -1702,10 +1702,16 @@ fn text_gradient(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(ID, "give `from` and `to`, or `reset`"));
     };
     let st = s.doc()?;
-    let t = st.selection.text.ok_or_else(|| bad(ID, "no text selected"))?;
     let d = &st.doc;
-    let frame =
-        t.frame.or_else(|| d.story(t.story).and_then(|story| story.frames.first().copied())).ok_or_else(|| bad(ID, "the text has no frame"))?;
+    // The selected text's frame, else the first selected text frame (its whole story).
+    let frame = match st.selection.text {
+        Some(t) => {
+            t.frame.or_else(|| d.story(t.story).and_then(|story| story.frames.first().copied())).ok_or_else(|| bad(ID, "the text has no frame"))?
+        }
+        None => {
+            st.selection.items.iter().copied().find(|i| d.item(*i).is_some_and(|it| it.is_text_frame())).ok_or_else(|| bad(ID, "no text selected"))?
+        }
+    };
     let loc = d.find(frame).ok_or_else(|| bad(ID, "no such frame"))?;
     let it = d.item(frame).ok_or_else(|| bad(ID, "no such frame"))?;
     let to_text = d.parent_xf(&loc) * d.text_xf(it);

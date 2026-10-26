@@ -209,3 +209,23 @@ fn a_gradient_dragged_across_selected_text_sets_the_texts_vector() {
     assert!(s.execute("type.gradient", &json!({"from": [1, 1], "to": [1, 1]})).is_err());
     assert!(s.execute("type.gradient", &json!({})).is_err());
 }
+
+/// Switching from the Type tool to the Gradient Swatch tool keeps the text selected (any other
+/// tool selects its frame instead); with the frame selected, `type.gradient` sets the vector on its
+/// whole text.
+#[test]
+fn the_gradient_swatch_tool_keeps_the_text_and_takes_a_whole_frame() {
+    let (mut s, sid) = setup("hello world");
+    let frame = s.doc().unwrap().doc.story(designcraft_doc::StoryId(sid)).unwrap().frames[0];
+    s.execute("tool.select", &json!({"tool": "type"})).unwrap();
+    s.execute("text.select", &json!({"story":sid,"anchor":0,"focus":5})).unwrap();
+    s.execute("tool.select", &json!({"tool": "gradientSwatch"})).unwrap();
+    assert!(s.doc().unwrap().selection.text.is_some(), "the text stays selected");
+    s.execute("tool.select", &json!({"tool": "selection"})).unwrap();
+    assert!(s.doc().unwrap().selection.text.is_none());
+    assert_eq!(s.doc().unwrap().selection.items, vec![frame], "the frame instead");
+    // The frame selected: the whole story.
+    s.execute("type.gradient", &json!({"from": [0, 0], "to": [100, 0]})).unwrap();
+    s.execute("text.select", &json!({"story":sid,"anchor":6,"focus":11})).unwrap();
+    assert!(attrs(&mut s)["fillGradient"].is_array(), "the last word too");
+}
