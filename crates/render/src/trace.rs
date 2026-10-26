@@ -163,8 +163,7 @@ fn watchdog(cores: usize) {
                 _ => true,
             };
             if due {
-                let path: Vec<String> =
-                    s.open.iter().map(|o| format!("{} ({} ms)", o.label, now.duration_since(o.start).as_millis())).collect();
+                let path: Vec<String> = s.open.iter().map(|o| format!("{} ({} ms)", o.label, now.duration_since(o.start).as_millis())).collect();
                 log::warn!("STALL [{}] {held} ms so far: {}", s.thread, path.join(" > "));
                 s.reported = Some((outer, now));
             }

@@ -26,9 +26,9 @@ pub use vello_cpu;
 mod blendspace;
 mod colorize;
 pub mod damage;
-pub mod trace;
 mod fx;
 mod grid;
+pub mod trace;
 
 /// How far (points) an object's soft effects reach outside its geometry.
 pub fn effect_outset(it: &Item) -> f64 {
@@ -572,7 +572,12 @@ impl Renderer {
             .into_iter()
             .filter_map(|(on, n)| on.then_some(n))
             .collect();
-            format!("item {} {kind}{}{}", it.id.0, if fx.is_empty() { String::new() } else { format!(" fx[{}]", fx.join(",")) }, if it.blend != DcBlend::Normal || it.opacity < 0.999 { " transparent" } else { "" })
+            format!(
+                "item {} {kind}{}{}",
+                it.id.0,
+                if fx.is_empty() { String::new() } else { format!(" fx[{}]", fx.join(",")) },
+                if it.blend != DcBlend::Normal || it.opacity < 0.999 { " transparent" } else { "" }
+            )
         });
         if self.drawing_items.len() >= 64 || self.drawing_items.contains(&it.id) {
             return;

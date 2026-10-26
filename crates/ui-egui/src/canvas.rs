@@ -1924,11 +1924,7 @@ fn draw_inverse_highlight(
     // Everything that changes the colours the canvas shows changes the highlight too: the display
     // options the canvas texture is redrawn for (Rich Black, Overprint Preview, quality …) and
     // the proof setup, ink limit and pasteboard behind them.
-    let display = (
-        format!("{:?}", display_key(app)),
-        app.ui.proof_colors.then(|| format!("{:?}", app.ui.proof_setup)),
-        back.to_array(),
-    );
+    let display = (format!("{:?}", display_key(app)), app.ui.proof_colors.then(|| format!("{:?}", app.ui.proof_setup)), back.to_array());
     // What the canvas shows under the highlight: cut from the canvas's own pixels when its texture
     // is at this zoom (no second render; Preview mode's clipping included), else rendered here.
     // The texture's pixel at the highlight's top left, kept in canvas space so scrolling (which

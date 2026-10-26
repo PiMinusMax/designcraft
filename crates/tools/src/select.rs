@@ -719,12 +719,24 @@ impl Tool for SelectionTool {
             self.drag = Drag::None;
             return actions;
         }
+        // The second press of a double click on an object in a group: select the object one level
+        // further in, so it can be moved and edited without ungrouping (each double click goes a
+        // level deeper in nested groups).
+        if !self.direct
+            && matches!(ev.kind, PointerKind::Down | PointerKind::DoubleClick)
+            && ev.click_count() == 2
+            && let Some(leaf) = hit_leaf(cx, p)
+            && let Some(inner) = deeper_in_group(cx, leaf)
+        {
+            self.drag = Drag::None;
+            return vec![Action::Exec("selection.set".into(), json!({"ids": [inner.0]}))];
+        }
         // The second press of a double click on a frame with content: toggle between the frame and
         // its content.
         if !self.direct
             && matches!(ev.kind, PointerKind::Down | PointerKind::DoubleClick)
             && ev.click_count() == 2
-            && let Some(id) = cx.hit_unlocked(p).map(|(_, id)| cx.doc.top_level_of(id).unwrap_or(id))
+            && let Some(id) = hit_leaf(cx, p).map(|id| picked(cx, id))
             && cx.doc.item(id).is_some_and(holds_content)
         {
             self.drag = Drag::None;
@@ -818,7 +830,8 @@ impl Tool for SelectionTool {
                 }
                 match cx.hit_unlocked(p) {
                     Some((sr, id)) => {
-                        let id = if self.direct { id } else { cx.doc.top_level_of(id).unwrap_or(id) };
+                        let leaf = hit_leaf(cx, p).unwrap_or(id);
+                        let id = if self.direct { leaf } else { picked(cx, leaf) };
                         let mut out = vec![];
                         if ev.mods.shift {
                             if cx.selection.contains(id) {
@@ -1322,6 +1335,43 @@ fn handle_cursor(h: usize) -> Cursor {
         1 | 5 => Cursor::ResizeV,
         _ => Cursor::ResizeH,
     }
+}
+
+/// The object under `p` inside the group there (not a group, not locked), or the top-level object
+/// when it is no group.
+fn hit_leaf(cx: &ToolContext, p: Point) -> Option<ItemId> {
+    let (_, top) = cx.hit_unlocked(p)?;
+    let (_, sp) = cx.layout.spread_at(p)?;
+    let item = cx.doc.item(top)?;
+    designcraft_doc::hit_descendant(item, sp, cx.tol(4.0), &|it| !it.is_group() && !it.locked).or(Some(top))
+}
+
+/// The groups from the top level down to `leaf`, and `leaf` itself.
+fn group_chain(cx: &ToolContext, leaf: ItemId) -> Vec<ItemId> {
+    let Some(loc) = cx.doc.find(leaf) else { return vec![leaf] };
+    (1..=loc.path.len())
+        .filter_map(|n| cx.doc.item_at(&designcraft_doc::ItemLoc { spread: loc.spread, path: loc.path[..n].to_vec() }).map(|it| it.id))
+        .collect()
+}
+
+/// What a Selection tool click on `leaf` takes: the object in its group chain that is selected
+/// (one entered by double-clicking, or picked in the Layers panel), so it moves on its own; else
+/// the top-level object (the whole group).
+fn picked(cx: &ToolContext, leaf: ItemId) -> ItemId {
+    let chain = group_chain(cx, leaf);
+    chain.iter().rev().find(|id| cx.selection.contains(**id)).or(chain.first()).copied().unwrap_or(leaf)
+}
+
+/// For a double click on `leaf` inside a group: the object one level below the selected one in its
+/// group chain (below the top-level group when none is selected). `None` at top level, or when the
+/// selected object is `leaf` itself.
+fn deeper_in_group(cx: &ToolContext, leaf: ItemId) -> Option<ItemId> {
+    let chain = group_chain(cx, leaf);
+    if chain.len() < 2 {
+        return None;
+    }
+    let at = chain.iter().rposition(|id| cx.selection.contains(*id)).unwrap_or(0);
+    chain.get(at + 1).copied()
 }
 
 /// Switch to the Type tool with the caret at `p` when it is over a text frame.

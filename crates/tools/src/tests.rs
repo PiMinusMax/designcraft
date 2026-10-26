@@ -2022,3 +2022,64 @@ fn locked_objects_are_not_selected_and_clicks_pass_through_them() {
         assert_eq!(ids(&click(&mut t, 160.0, 160.0)), serde_json::json!([behind.0]), "{tool}: through it to the object behind");
     }
 }
+
+/// A double click with the Selection tool on an object in a group selects that object, one level
+/// further in per double click; a click and drag on the selected object then moves it on its own.
+#[test]
+fn a_double_click_selects_an_object_inside_its_group() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (ra, rb, rc) = (Rect::new(100.0, 100.0, 200.0, 200.0), Rect::new(300.0, 100.0, 400.0, 200.0), Rect::new(500.0, 100.0, 600.0, 200.0));
+    let rect = |d: &mut Document, r: Rect| {
+        let mut it = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, shapes::rectangle(r));
+        it.fill = designcraft_doc::Fill::swatch("[Black]");
+        it
+    };
+    let (a, b, c) = (rect(&mut d, ra), rect(&mut d, rb), rect(&mut d, rc));
+    let (aid, bid) = (a.id, b.id);
+    // An outer group of a, and an inner group of b and c.
+    let inner = ItemId(d.alloc());
+    let mut ig = Item::new(inner, lid, Shape::Group, shapes::rectangle(rb.union(rc)));
+    ig.content = designcraft_doc::item::Content::Group { items: vec![Arc::new(b), Arc::new(c)] };
+    let outer = ItemId(d.alloc());
+    let mut og = Item::new(outer, lid, Shape::Group, shapes::rectangle(ra.union(rc)));
+    og.content = designcraft_doc::item::Content::Group { items: vec![Arc::new(a), Arc::new(ig)] };
+    d.insert_item(SpreadRef::Doc(0), og, None).unwrap();
+    let (cache, l) = (Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let at = |x: f64, y: f64| Point::new(x + off.x, y + off.y);
+    let set = |actions: &[Action]| {
+        actions.iter().find_map(|a| match a {
+            Action::Exec(id, p) if id == "selection.set" => {
+                Some(p["ids"].as_array().unwrap().iter().map(|v| ItemId(v.as_u64().unwrap())).collect::<Vec<_>>())
+            }
+            _ => None,
+        })
+    };
+    let selected = |ids: &[ItemId]| Selection { items: ids.to_vec(), ..Selection::default() };
+    let mut t = create("selection");
+    let double = |t: &mut Box<dyn Tool>, s: &Selection, p: Point| {
+        let cx = ctx(&d, s, &cache, &l);
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Down, p.x, p.y).with_clicks(2))
+    };
+    // A click picks the whole group.
+    let none = Selection::default();
+    let first = t.pointer(&ctx(&d, &none, &cache, &l), &PointerEvent::new(PointerKind::Down, at(150.0, 150.0).x, at(150.0, 150.0).y));
+    assert_eq!(set(&first), Some(vec![outer]));
+    t.pointer(&ctx(&d, &none, &cache, &l), &PointerEvent::new(PointerKind::Up, at(150.0, 150.0).x, at(150.0, 150.0).y));
+    // The double click goes into it: a.
+    assert_eq!(set(&double(&mut t, &selected(&[outer]), at(150.0, 150.0))), Some(vec![aid]));
+    // On b, nested one deeper: first the inner group, then b.
+    assert_eq!(set(&double(&mut t, &selected(&[outer]), at(350.0, 150.0))), Some(vec![inner]));
+    assert_eq!(set(&double(&mut t, &selected(&[inner]), at(350.0, 150.0))), Some(vec![bid]));
+    assert_eq!(set(&double(&mut t, &selected(&[bid]), at(350.0, 150.0))), None, "b is as deep as it goes");
+    // With a selected, pressing on it keeps a (a drag then moves a, not the group).
+    let s = selected(&[aid]);
+    let cx = ctx(&d, &s, &cache, &l);
+    let mut t = create("selection");
+    let down = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, at(150.0, 150.0).x, at(150.0, 150.0).y));
+    assert_eq!(set(&down), None, "the selection stays a");
+    // A press on another part of the group picks the whole group again.
+    let down = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, at(550.0, 150.0).x, at(550.0, 150.0).y));
+    assert_eq!(set(&down), Some(vec![outer]));
+}
