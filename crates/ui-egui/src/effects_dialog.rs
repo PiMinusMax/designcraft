@@ -942,6 +942,8 @@ mod tests {
         set(app.ui.dialog.as_mut().unwrap(), &["dropShadow", "color"], json!("Shade"));
         assert!(painted(&mut app, shade), "the chosen swatch's colour is shown, not only its name");
         assert_eq!(params(app.ui.dialog.as_ref().unwrap())["effects"]["dropShadow"]["color"], "Shade");
+    }
+
     /// The angle dial points where the pointer is, as InDesign's: right is 0°, up 90°, left 180°,
     /// down −90°, upper left 135°.
     #[test]
