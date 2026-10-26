@@ -1696,6 +1696,16 @@ fn empty_para_mark(story: &designcraft_doc::Story, pos: usize) -> bool {
 fn text_gradient(s: &mut Session, p: &Value) -> Result<Value> {
     const ID: &str = "type.gradient";
     if p.get("reset").and_then(Value::as_bool) == Some(true) {
+        // An explicit "no vector" on the selected characters, so a vector their character style
+        // sets doesn't come back; at a caret, the next typing drops its own.
+        let targets = format_targets(s);
+        if targets.iter().any(|t| !t.range.is_empty()) {
+            let a = CharAttrs { fill_gradient: Some(None), ..Default::default() };
+            return s.edit(|d, _| {
+                apply_char_attrs(d, &targets, &a, &[]);
+                ok()
+            });
+        }
         return format_chars(s, &json!({"fillGradient": null}));
     }
     let (Some(from), Some(to)) = (super::point_param(p, "from"), super::point_param(p, "to")) else {

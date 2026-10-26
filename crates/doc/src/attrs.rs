@@ -1063,7 +1063,7 @@ attr_set! {
         fill_tint: f32 = 1.0,
         /// The Gradient Swatch tool's vector for a gradient fill, start and end in the frame's text
         /// space; `None` lays the gradient across the frame's box.
-        fill_gradient: Option<[f64; 4]> = None,
+        fill_gradient: Option<[f64; 4]> = None => "deserialize_explicit_value",
         stroke: String = "[None]".into(),
         stroke_tint: f32 = 1.0,
         stroke_weight: f64 = 1.0,

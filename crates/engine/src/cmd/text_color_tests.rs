@@ -229,3 +229,21 @@ fn the_gradient_swatch_tool_keeps_the_text_and_takes_a_whole_frame() {
     s.execute("text.select", &json!({"story":sid,"anchor":6,"focus":11})).unwrap();
     assert!(attrs(&mut s)["fillGradient"].is_array(), "the last word too");
 }
+
+/// Reset lays the gradient across the frame again even when the character style sets a vector:
+/// the characters get an explicit "no vector", which also survives saving.
+#[test]
+fn reset_overrides_a_character_styles_gradient_vector() {
+    let (mut s, sid) = setup("hello world");
+    s.execute("style.character.create", &json!({"name": "Swept", "chars": {"fillGradient": [0, 0, 50, 0]}})).unwrap();
+    s.execute("text.select", &json!({"story":sid,"anchor":0,"focus":5})).unwrap();
+    s.execute("style.character.apply", &json!({"name": "Swept"})).unwrap();
+    assert!(attrs(&mut s)["fillGradient"].is_array(), "the style's vector");
+    s.execute("type.gradient", &json!({"reset": true})).unwrap();
+    assert!(attrs(&mut s)["fillGradient"].is_null(), "reset wins over the style");
+    let story = s.doc().unwrap().doc.story(designcraft_doc::StoryId(sid)).unwrap();
+    let over = story.format_after(0).over.clone();
+    assert_eq!(over.fill_gradient, Some(None));
+    let back: designcraft_doc::CharAttrs = serde_json::from_value(serde_json::to_value(&over).unwrap()).unwrap();
+    assert_eq!(back.fill_gradient, Some(None), "kept through saving");
+}
