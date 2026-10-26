@@ -262,21 +262,24 @@ pub struct WindowState {
 impl WindowState {
     /// The window as egui reports it this frame, over what was known (`self`): the size only
     /// while it is an ordinary window, so restoring from maximized gets the size it had.
-    pub fn observe(self, vp: &egui::ViewportInfo) -> WindowState {
+    /// `content` is the window's content size, for window systems that report no window rect
+    /// (Wayland gives no position).
+    pub fn observe(self, vp: &egui::ViewportInfo, content: egui::Vec2) -> WindowState {
         let maximized = vp.maximized.unwrap_or(self.maximized);
         let fullscreen = vp.fullscreen.unwrap_or(self.fullscreen);
-        let size = match vp.inner_rect {
-            Some(r) if !maximized && !fullscreen && r.width().is_finite() && r.height().is_finite() && r.width() > 0.0 && r.height() > 0.0 => {
-                Some([r.width().round(), r.height().round()])
-            }
-            _ => self.size,
+        let inner = vp.inner_rect.map_or(content, |r| r.size());
+        let size = if !maximized && !fullscreen && inner.x.is_finite() && inner.y.is_finite() && inner.x > 0.0 && inner.y > 0.0 {
+            Some([inner.x.round(), inner.y.round()])
+        } else {
+            self.size
         };
         WindowState { size, maximized, fullscreen }
     }
 
-    /// What to tell the window that just opened (`vp`) to be as it was left (`self`): maximized
-    /// or full screen when it isn't yet; else a size that fits the monitor ([`Self::fit`]).
-    pub fn restore(self, vp: &egui::ViewportInfo) -> Vec<egui::ViewportCommand> {
+    /// What to tell the window that just opened (`vp`, `content` as in [`Self::observe`]) to be
+    /// as it was left (`self`): maximized or full screen when it isn't yet; else a size that fits
+    /// the monitor ([`Self::fit`]).
+    pub fn restore(self, vp: &egui::ViewportInfo, content: egui::Vec2) -> Vec<egui::ViewportCommand> {
         if self.fullscreen && vp.fullscreen != Some(true) {
             return vec![egui::ViewportCommand::Fullscreen(true)];
         }
@@ -286,25 +289,25 @@ impl WindowState {
         if self.fullscreen || self.maximized {
             return Vec::new();
         }
-        Self::fit(vp).into_iter().collect()
+        Self::fit(vp, content).into_iter().collect()
     }
 
     /// A window larger than the monitor it opened on (its size saved on a bigger screen): the size
     /// that fits, with a margin for the desktop's own bars. None when it fits, or is maximized or
     /// full screen (those follow the monitor).
-    pub fn fit(vp: &egui::ViewportInfo) -> Option<egui::ViewportCommand> {
+    pub fn fit(vp: &egui::ViewportInfo, content: egui::Vec2) -> Option<egui::ViewportCommand> {
         let monitor = vp.monitor_size.filter(|m| m.x > 0.0 && m.y > 0.0)?;
         if vp.maximized == Some(true) || vp.fullscreen == Some(true) {
             return None;
         }
-        let outer = vp.outer_rect.or(vp.inner_rect)?;
-        let inner = vp.inner_rect?;
-        let room = monitor * 0.92;
-        if outer.width() <= monitor.x && outer.height() <= monitor.y {
+        let inner = vp.inner_rect.map_or(content, |r| r.size());
+        let outer = vp.outer_rect.map_or(inner, |r| r.size());
+        if !(inner.x > 0.0 && inner.y > 0.0) || (outer.x <= monitor.x && outer.y <= monitor.y) {
             return None;
         }
-        let deco = outer.size() - inner.size();
-        Some(egui::ViewportCommand::InnerSize((room - deco).max(egui::vec2(400.0, 300.0)).min(inner.size())))
+        let room = monitor * 0.92;
+        let deco = outer - inner;
+        Some(egui::ViewportCommand::InnerSize((room - deco).max(egui::vec2(400.0, 300.0)).min(inner)))
     }
 }
 
@@ -2179,14 +2182,16 @@ impl DesignApp {
         self.window_frames = self.window_frames.saturating_add(1);
         if !self.window_fitted && (ctx.input(|i| i.viewport().monitor_size.is_some()) || self.window_frames > 3) {
             let saved = self.ui.window.unwrap_or_default();
-            let cmds = ctx.input(|i| saved.restore(i.viewport()));
+            let content = ctx.content_rect().size();
+            let cmds = ctx.input(|i| saved.restore(i.viewport(), content));
             for cmd in cmds {
                 log::info!("window: restoring {cmd:?}");
                 ctx.send_viewport_cmd(cmd);
             }
             self.window_fitted = true;
         }
-        let window = ctx.input(|i| self.ui.window.unwrap_or_default().observe(i.viewport()));
+        let content = ctx.content_rect().size();
+        let window = ctx.input(|i| self.ui.window.unwrap_or_default().observe(i.viewport(), content));
         if self.ui.window != Some(window) && window != WindowState::default() {
             self.ui.window = Some(window);
         }
@@ -5409,9 +5414,9 @@ mod window_state_tests {
     /// restoring it gets that size back.
     #[test]
     fn the_window_is_remembered_as_left() {
-        let w = WindowState::default().observe(&vp([1200.0, 800.0], [1920.0, 1080.0], false));
+        let w = WindowState::default().observe(&vp([1200.0, 800.0], [1920.0, 1080.0], false), egui::Vec2::ZERO);
         assert_eq!(w, WindowState { size: Some([1200.0, 800.0]), maximized: false, fullscreen: false });
-        let max = w.observe(&vp([1920.0, 1050.0], [1920.0, 1080.0], true));
+        let max = w.observe(&vp([1920.0, 1050.0], [1920.0, 1080.0], true), egui::Vec2::ZERO);
         assert_eq!(max, WindowState { size: Some([1200.0, 800.0]), maximized: true, fullscreen: false });
         // A file from before the window was kept loads without it.
         let ui: super::UiState = serde_json::from_str("{}").unwrap();
@@ -5422,12 +5427,12 @@ mod window_state_tests {
     /// window never reaches past it; one that fits, or a maximized one, is left as it is.
     #[test]
     fn a_window_saved_on_a_bigger_screen_fits_a_smaller_one() {
-        let Some(egui::ViewportCommand::InnerSize(s)) = WindowState::fit(&vp([2400.0, 1400.0], [1366.0, 768.0], false)) else {
+        let Some(egui::ViewportCommand::InnerSize(s)) = WindowState::fit(&vp([2400.0, 1400.0], [1366.0, 768.0], false), egui::Vec2::ZERO) else {
             panic!("a command to fit")
         };
         assert!(s.x <= 1366.0 && s.y + 30.0 <= 768.0, "{s:?}");
-        assert!(WindowState::fit(&vp([1200.0, 700.0], [1366.0, 768.0], false)).is_none());
-        assert!(WindowState::fit(&vp([2400.0, 1400.0], [1366.0, 768.0], true)).is_none());
+        assert!(WindowState::fit(&vp([1200.0, 700.0], [1366.0, 768.0], false), egui::Vec2::ZERO).is_none());
+        assert!(WindowState::fit(&vp([2400.0, 1400.0], [1366.0, 768.0], true), egui::Vec2::ZERO).is_none());
     }
 
     /// Left maximized (or full screen), the window is told so again once it shows, as Wayland
@@ -5435,11 +5440,30 @@ mod window_state_tests {
     #[test]
     fn a_window_left_maximized_opens_maximized() {
         let max = WindowState { size: Some([1200.0, 800.0]), maximized: true, fullscreen: false };
-        assert_eq!(max.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false)), vec![egui::ViewportCommand::Maximized(true)]);
-        assert!(max.restore(&vp([1920.0, 1050.0], [1920.0, 1080.0], true)).is_empty());
+        assert_eq!(max.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false), egui::Vec2::ZERO), vec![egui::ViewportCommand::Maximized(true)]);
+        assert!(max.restore(&vp([1920.0, 1050.0], [1920.0, 1080.0], true), egui::Vec2::ZERO).is_empty());
         let full = WindowState { fullscreen: true, ..max };
-        assert_eq!(full.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false)), vec![egui::ViewportCommand::Fullscreen(true)]);
+        assert_eq!(full.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false), egui::Vec2::ZERO), vec![egui::ViewportCommand::Fullscreen(true)]);
         let plain = WindowState { size: Some([1200.0, 800.0]), ..Default::default() };
-        assert!(plain.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false)).is_empty());
+        assert!(plain.restore(&vp([1200.0, 800.0], [1920.0, 1080.0], false), egui::Vec2::ZERO).is_empty());
+    }
+
+    /// Wayland reports no window rect: the size comes from the window's content, so a resize is
+    /// still remembered, and a window too big for the monitor still made to fit.
+    #[test]
+    fn without_a_window_rect_the_content_size_counts() {
+        let wayland = |maximized| egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1366.0, 768.0)),
+            maximized: Some(maximized),
+            fullscreen: Some(false),
+            ..Default::default()
+        };
+        let w = WindowState::default().observe(&wayland(false), egui::vec2(1000.0, 700.0));
+        assert_eq!(w.size, Some([1000.0, 700.0]));
+        let Some(egui::ViewportCommand::InnerSize(s)) = WindowState::fit(&wayland(false), egui::vec2(2400.0, 1400.0)) else {
+            panic!("a command to fit")
+        };
+        assert!(s.x <= 1366.0 && s.y <= 768.0, "{s:?}");
+        assert!(WindowState::fit(&wayland(false), egui::vec2(1000.0, 700.0)).is_none());
     }
 }
