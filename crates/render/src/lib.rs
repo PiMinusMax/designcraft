@@ -906,7 +906,7 @@ impl Renderer {
                 let to_pixels = (xf * g.xf * to_image).inverse();
                 // The document is walked for effects only when a large image needs it.
                 let area = || {
-                    let reach = effect_reach(f.doc);
+                    let reach = image_effect_reach(f.doc, g).unwrap_or_else(|| effect_reach(f.doc));
                     f.visible.inflate(reach, reach)
                 };
                 match plate_part(&pm, plate, to_pixels, area) {
@@ -993,6 +993,23 @@ fn effect_reach(doc: &Document) -> f64 {
     reach
 }
 
+/// How far the effects of the object showing graphic `g` and of the groups around it can carry
+/// its pixels: only those move or spread this image. None when the graphic isn't found on a page
+/// (an anchored object in a story): then [`effect_reach`] covers it.
+fn image_effect_reach(doc: &Document, g: &designcraft_doc::Graphic) -> Option<f64> {
+    fn find(it: &Item, g: &designcraft_doc::Graphic, around: f64, depth: usize) -> Option<f64> {
+        let reach = around + if it.effects.any() { fx::outset(it) + 144.0 } else { 0.0 };
+        if it.graphic().is_some_and(|own| std::ptr::eq(own, g)) {
+            return Some(reach);
+        }
+        if depth >= 64 {
+            return None;
+        }
+        it.children().iter().find_map(|c| find(c, g, reach, depth + 1))
+    }
+    doc.spreads.iter().flat_map(|sp| &sp.items).chain(doc.parents.iter().flat_map(|p| &p.items)).find_map(|it| find(it, g, 0.0, 0))
+}
+
 /// An image's plate (see [`plate_pixmap`]) where `area` (spread space; `to_pixels` maps it to the
 /// image's pixels) can show it, and where that part starts in the image. Small images are
 /// converted whole and cached. A large one (a 3840 × 5760 photo at full resolution, zoomed in)
@@ -1019,11 +1036,11 @@ fn plate_part(
         return None;
     }
     // All or nearly all of it in view (three quarters or more): convert the whole plate once and
-    // keep it, as long as it fits the cache at all. Converting it in parts would redo nearly all
-    // of it on every render.
+    // keep it, as long as it takes at most half the cache (kept whole, a bigger one would push
+    // every other image out). Converting it in parts would redo nearly all of it on every render.
     let part_area = u64::from(x1 - x0) * u64::from(y1 - y0);
     let whole_area = u64::from(w) * u64::from(h);
-    if part_area.saturating_mul(4) >= whole_area.saturating_mul(3) && plate_bytes(w, h) <= PLATE_CACHE_BYTES {
+    if part_area.saturating_mul(4) >= whole_area.saturating_mul(3) && plate_bytes(w, h) <= PLATE_CACHE_BYTES / 2 {
         return Some((plate_pixmap(pm, plate), (0, 0)));
     }
     let row = usize::from(w);
@@ -2095,6 +2112,50 @@ mod tests {
         };
         assert!(px(false, &mut r)[0] > 20, "accurate: a dark grey");
         assert_eq!(px(true, &mut r)[..3], [0, 0, 0]);
+    }
+
+    /// A large image is widened only by the effects that move its own pixels (its object's and
+    /// the groups' around it), not by a big shadow elsewhere in the document.
+    #[test]
+    fn an_images_effect_reach_is_its_own() {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let graphic = |aid| designcraft_doc::Graphic {
+            layer_options: None,
+            asset: aid,
+            size: (100.0, 100.0),
+            xf: Affine::IDENTITY,
+            clip: None,
+            auto_fit: Default::default(),
+            fit_align: 4,
+            crop: [0.0; 4],
+            wrap: Default::default(),
+            fill: Default::default(),
+        };
+        let item = |d: &mut Document, shadow: f64, with_graphic: bool| {
+            let mut it = Item::new(
+                designcraft_doc::ItemId(d.alloc()),
+                lid,
+                designcraft_doc::Shape::Rectangle,
+                designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, 100.0, 100.0)),
+            );
+            if with_graphic {
+                it.content = designcraft_doc::Content::Graphic(graphic(designcraft_doc::AssetId(1)));
+            }
+            if shadow > 0.0 {
+                it.effects.drop_shadow.on = true;
+                it.effects.drop_shadow.distance = shadow;
+            }
+            d.insert_item(SpreadRef::Doc(0), it.clone(), None).unwrap();
+            it.id
+        };
+        let image = item(&mut d, 0.0, true);
+        item(&mut d, 500.0, false);
+        let g = d.item(image).unwrap().graphic().unwrap().clone();
+        let own = d.item(image).unwrap().graphic().unwrap();
+        assert_eq!(image_effect_reach(&d, own), Some(0.0), "no effect on the image's own object");
+        assert!(effect_reach(&d) > 500.0, "the document-wide reach counts the other shadow");
+        assert_eq!(image_effect_reach(&d, &g), None, "a graphic not in the document: the document-wide reach");
     }
 
     #[test]
