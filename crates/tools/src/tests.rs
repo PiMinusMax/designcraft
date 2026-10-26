@@ -19,6 +19,7 @@ fn ctx<'a>(d: &'a Document, s: &'a Selection, c: &'a Cache, l: &'a CanvasLayout)
         snap: SnapView::OFF,
         unit: Unit::Points,
         stroke_in_front: false,
+        affects_text: false,
     }
 }
 
@@ -218,6 +219,27 @@ fn gradient_tool_on_selected_text_sets_the_texts_gradient() {
             assert!(p.get("ids").is_none());
         }
         other => panic!("{other:?}"),
+    }
+}
+
+/// With Formatting Affects Text on and a text frame selected, the Gradient Swatch tool positions
+/// the text's gradient; off, the frame's.
+#[test]
+fn gradient_tool_with_formatting_affects_text_sets_the_texts_gradient() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (fid, _) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 300.0, 200.0), lid, "Hello", ParaFormat::default()).unwrap();
+    let s = Selection { items: vec![fid], ..Default::default() };
+    let (c, l) = (Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    for (affects_text, want) in [(true, "type.gradient"), (false, "object.gradient")] {
+        let cx = ToolContext { affects_text, ..ctx(&d, &s, &c, &l) };
+        let mut t = create("gradientSwatch");
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 120.0 + off.x, 150.0 + off.y));
+        match &t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 220.0 + off.x, 150.0 + off.y))[0] {
+            Action::Preview(cmd, _) => assert_eq!(cmd, want),
+            other => panic!("{other:?}"),
+        }
     }
 }
 
