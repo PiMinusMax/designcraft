@@ -171,9 +171,10 @@ pub struct SavedWorkspace {
     pub dock_expanded: bool,
     pub open_panel: Option<String>,
     pub floating: Vec<(String, [f32; 2])>,
-    /// Floating panel sizes (see [`UiState::panel_sizes`]); absent in older workspace files.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub panel_sizes: std::collections::BTreeMap<String, [f32; 2]>,
+    /// Floating panel sizes (see [`UiState::panel_sizes`]). `None` in workspace files from before
+    /// sizes were kept: the panels keep the sizes they have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_sizes: Option<std::collections::BTreeMap<String, [f32; 2]>>,
     /// Custom panel membership and placement; absent in older workspace files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docking: Option<craft_ui::docking::Layout<String>>,
@@ -277,6 +278,11 @@ impl WindowState {
             self.size
         };
         WindowState { size, maximized, fullscreen }
+    }
+
+    /// Whether the window went from maximized or full screen (`self`) to an ordinary one (`now`).
+    pub fn unmaximized_to(self, now: WindowState) -> bool {
+        (self.maximized || self.fullscreen) && !(now.maximized || now.fullscreen)
     }
 
     /// What to tell the window that just opened (`vp`, `content` as in [`Self::observe`]) to be
@@ -2199,6 +2205,12 @@ impl DesignApp {
             let content = ctx.content_rect().size();
             let zoom = ctx.zoom_factor();
             let window = ctx.input(|i| self.ui.window.unwrap_or_default().observe(i.viewport(), content, zoom));
+            // Leaving maximized or full screen brings back the ordinary size, which may have been
+            // saved on a bigger monitor: fit it again on the next pass.
+            if self.ui.window.is_some_and(|before| before.unmaximized_to(window)) {
+                self.window_fitted = false;
+                self.window_frames = u8::MAX;
+            }
             if self.ui.window != Some(window) && window != WindowState::default() {
                 self.ui.window = Some(window);
             }
@@ -5482,5 +5494,28 @@ mod window_state_tests {
         // A 1500 × 900 window shows 1000 × 600 egui points at 150 %.
         let w = WindowState::default().observe(&vp([1000.0, 600.0], [1920.0, 1080.0], false), egui::Vec2::ZERO, 1.5);
         assert_eq!(w.size, Some([1500.0, 900.0]));
+    }
+
+    /// Leaving maximized or full screen is noticed, so the ordinary size is fitted to the monitor
+    /// again; other changes are not.
+    #[test]
+    fn leaving_maximized_is_noticed() {
+        let max = WindowState { size: Some([3000.0, 2000.0]), maximized: true, fullscreen: false };
+        let plain = WindowState { maximized: false, ..max };
+        assert!(max.unmaximized_to(plain));
+        assert!(WindowState { fullscreen: true, maximized: false, ..max }.unmaximized_to(plain));
+        assert!(!plain.unmaximized_to(max) && !plain.unmaximized_to(plain) && !max.unmaximized_to(max));
+    }
+
+    /// A workspace saved with no panel sizes brings none (the current ones go); one from before
+    /// sizes were kept leaves them.
+    #[test]
+    fn a_workspace_tells_none_from_absent_panel_sizes() {
+        let new: crate::SavedWorkspace = serde_json::from_str(r#"{"name": "A", "panelSizes": {}}"#).unwrap();
+        assert_eq!(new.panel_sizes, Some(Default::default()));
+        let old: crate::SavedWorkspace = serde_json::from_str(r#"{"name": "B"}"#).unwrap();
+        assert_eq!(old.panel_sizes, None);
+        let saved = serde_json::to_value(&new).unwrap();
+        assert_eq!(saved["panelSizes"], serde_json::json!({}));
     }
 }
