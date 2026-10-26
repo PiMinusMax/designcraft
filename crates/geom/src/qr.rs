@@ -141,7 +141,7 @@ pub fn qr_shapes(text: &str, r: Rect, style: &QrStyle) -> Option<QrShapes> {
     // non-finite one holds no code.
     let r = r.abs();
     let side = r.width().min(r.height());
-    if !(side.is_finite() && side > 0.0) {
+    if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) || side <= 0.0 {
         return None;
     }
     let qr = qrcodegen::QrCode::encode_text(text, style.ecc.level()).ok()?;
@@ -435,7 +435,12 @@ mod tests {
             let back = qr_shapes("https://example.com", Rect::new(200.0, 200.0, 100.0, 100.0), &style).unwrap();
             assert_eq!(fwd, back, "{modules:?}");
         }
-        for r in [Rect::new(5.0, 5.0, 5.0, 50.0), Rect::new(0.0, 0.0, f64::NAN, 9.0), Rect::new(0.0, 0.0, f64::INFINITY, f64::INFINITY)] {
+        for r in [
+            Rect::new(5.0, 5.0, 5.0, 50.0),
+            Rect::new(0.0, 0.0, f64::NAN, 9.0),
+            Rect::new(0.0, 0.0, f64::INFINITY, f64::INFINITY),
+            Rect::new(0.0, 0.0, 10.0, f64::INFINITY),
+        ] {
             assert!(qr_shapes("x", r, &QrStyle::default()).is_none(), "{r:?}");
         }
     }
