@@ -253,7 +253,8 @@ pub(crate) fn second_window_viewport() -> egui::ViewportId {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WindowState {
-    /// Its inner size when neither maximized nor full screen (logical points).
+    /// Its inner size when neither maximized nor full screen, in the window system's logical
+    /// points (what the window is created with), not egui's points, which UI Scaling enlarges.
     pub size: Option<[f32; 2]>,
     pub maximized: bool,
     pub fullscreen: bool,
@@ -263,11 +264,13 @@ impl WindowState {
     /// The window as egui reports it this frame, over what was known (`self`): the size only
     /// while it is an ordinary window, so restoring from maximized gets the size it had.
     /// `content` is the window's content size, for window systems that report no window rect
-    /// (Wayland gives no position).
-    pub fn observe(self, vp: &egui::ViewportInfo, content: egui::Vec2) -> WindowState {
+    /// (Wayland gives no position); `zoom` is UI Scaling's zoom factor, by which egui's points
+    /// are larger than the window system's.
+    pub fn observe(self, vp: &egui::ViewportInfo, content: egui::Vec2, zoom: f32) -> WindowState {
         let maximized = vp.maximized.unwrap_or(self.maximized);
         let fullscreen = vp.fullscreen.unwrap_or(self.fullscreen);
-        let inner = vp.inner_rect.map_or(content, |r| r.size());
+        let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+        let inner = vp.inner_rect.map_or(content, |r| r.size()) * zoom;
         let size = if !maximized && !fullscreen && inner.x.is_finite() && inner.y.is_finite() && inner.x > 0.0 && inner.y > 0.0 {
             Some([inner.x.round(), inner.y.round()])
         } else {
@@ -2190,10 +2193,15 @@ impl DesignApp {
             }
             self.window_fitted = true;
         }
-        let content = ctx.content_rect().size();
-        let window = ctx.input(|i| self.ui.window.unwrap_or_default().observe(i.viewport(), content));
-        if self.ui.window != Some(window) && window != WindowState::default() {
-            self.ui.window = Some(window);
+        // Only once the saved state is applied: before, the window shows as created (not yet
+        // maximized), which must not replace what was saved.
+        if self.window_fitted {
+            let content = ctx.content_rect().size();
+            let zoom = ctx.zoom_factor();
+            let window = ctx.input(|i| self.ui.window.unwrap_or_default().observe(i.viewport(), content, zoom));
+            if self.ui.window != Some(window) && window != WindowState::default() {
+                self.ui.window = Some(window);
+            }
         }
         // Fonts/theme must be installed from the real UI pass, before the font gate below: doing
         // this only from a hidden logic tick would make the first shown pass wait forever.
@@ -5414,9 +5422,9 @@ mod window_state_tests {
     /// restoring it gets that size back.
     #[test]
     fn the_window_is_remembered_as_left() {
-        let w = WindowState::default().observe(&vp([1200.0, 800.0], [1920.0, 1080.0], false), egui::Vec2::ZERO);
+        let w = WindowState::default().observe(&vp([1200.0, 800.0], [1920.0, 1080.0], false), egui::Vec2::ZERO, 1.0);
         assert_eq!(w, WindowState { size: Some([1200.0, 800.0]), maximized: false, fullscreen: false });
-        let max = w.observe(&vp([1920.0, 1050.0], [1920.0, 1080.0], true), egui::Vec2::ZERO);
+        let max = w.observe(&vp([1920.0, 1050.0], [1920.0, 1080.0], true), egui::Vec2::ZERO, 1.0);
         assert_eq!(max, WindowState { size: Some([1200.0, 800.0]), maximized: true, fullscreen: false });
         // A file from before the window was kept loads without it.
         let ui: super::UiState = serde_json::from_str("{}").unwrap();
@@ -5458,12 +5466,21 @@ mod window_state_tests {
             fullscreen: Some(false),
             ..Default::default()
         };
-        let w = WindowState::default().observe(&wayland(false), egui::vec2(1000.0, 700.0));
+        let w = WindowState::default().observe(&wayland(false), egui::vec2(1000.0, 700.0), 1.0);
         assert_eq!(w.size, Some([1000.0, 700.0]));
         let Some(egui::ViewportCommand::InnerSize(s)) = WindowState::fit(&wayland(false), egui::vec2(2400.0, 1400.0)) else {
             panic!("a command to fit")
         };
         assert!(s.x <= 1366.0 && s.y <= 768.0, "{s:?}");
         assert!(WindowState::fit(&wayland(false), egui::vec2(1000.0, 700.0)).is_none());
+    }
+
+    /// With UI Scaling at 150 %, egui's points are 1.5 times the window system's: the size is
+    /// kept in the window system's, so the window doesn't shrink with every restart.
+    #[test]
+    fn ui_scaling_does_not_shrink_the_window_on_restart() {
+        // A 1500 × 900 window shows 1000 × 600 egui points at 150 %.
+        let w = WindowState::default().observe(&vp([1000.0, 600.0], [1920.0, 1080.0], false), egui::Vec2::ZERO, 1.5);
+        assert_eq!(w.size, Some([1500.0, 900.0]));
     }
 }
