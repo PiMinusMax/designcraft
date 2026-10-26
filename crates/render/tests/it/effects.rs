@@ -499,7 +499,7 @@ fn a_groups_drop_shadow_is_cast_by_its_objects() {
     }
     let e = &mut d.item_mut(gid).unwrap().effects;
     e.drop_shadow.on = false;
-    e.outer_glow = designcraft_doc::OuterGlow { on: true, color: "[Black]".into(), opacity: 1.0, size: 10.0, spread: 100.0 };
+    e.outer_glow = designcraft_doc::OuterGlow { on: true, color: "[Black]".into(), opacity: 1.0, size: 10.0, spread: 100.0, ..Default::default() };
     let img = render(&d);
     assert!(lum(img.pixel(65, 40)) < 120, "the glow surrounds the objects: {:?}", img.pixel(65, 40));
     assert_eq!(lum(img.pixel(75, 40)), WHITE, "and stops {} pt from them", 10);
