@@ -2104,6 +2104,8 @@ fn a_double_click_selects_an_object_inside_its_group() {
     // A press on another part of the group picks the whole group again.
     let down = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, at(550.0, 150.0).x, at(550.0, 150.0).y));
     assert_eq!(set(&down), Some(vec![outer]));
+}
+
 /// A turned object's handles sit on its own (turned) box, not on the bounding box around it; a
 /// drag on one resizes it along its own axes (`transform.resize` with `own`).
 #[test]
