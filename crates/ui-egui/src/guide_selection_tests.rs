@@ -425,4 +425,30 @@ fn an_injected_button_change_waits_for_a_pass_without_one() {
     let mut next = egui::RawInput::default();
     app.raw_input_hook(&ctx, &mut next);
     assert_eq!(next.events, vec![button(5.0, true)], "and comes in the next pass");
+/// A guide pulled out of a ruler keeps the resize cursor across it over the canvas until it is
+/// dropped; the tool's arrow came back as soon as the pointer left the ruler.
+#[test]
+fn a_guide_dragged_out_of_a_ruler_keeps_its_cursor_until_dropped() {
+    let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({})).unwrap();
+    let mut h = harness(app);
+    let rect = h.state().canvas_rect.unwrap();
+    for (from, icon) in [
+        (pos2(rect.center().x, rect.min.y - crate::canvas::RULER / 2.0), egui::CursorIcon::ResizeVertical),
+        (pos2(rect.min.x - crate::canvas::RULER / 2.0, rect.center().y), egui::CursorIcon::ResizeHorizontal),
+    ] {
+        let to = rect.center();
+        h.hover_at(from);
+        h.step();
+        press(&mut h, from, true, Modifiers::NONE);
+        for k in 1..=4 {
+            h.hover_at(from + (to - from) * (k as f32 / 4.0));
+            h.step();
+            assert_eq!(h.output().platform_output.cursor_icon, icon, "step {k} of the drag from {from:?}");
+        }
+        press(&mut h, to, false, Modifiers::NONE);
+        h.hover_at(to);
+        h.run_steps(2);
+        assert_ne!(h.output().platform_output.cursor_icon, icon, "dropped: the tool's cursor again");
+    }
 }
