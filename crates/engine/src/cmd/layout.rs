@@ -1371,12 +1371,29 @@ fn set_layer(s: &mut Session, p: &Value) -> Result<Value> {
 /// Drop the objects on `layers` (nested ones too) from the selection: those layers were just
 /// locked or hidden, and their objects can't be selected or edited.
 fn deselect_on_layers(d: &designcraft_doc::Document, sel: &mut designcraft_doc::Selection, layers: &[LayerId]) {
+    // An object is on such a layer by its own layer or a group's around it (a group may hold
+    // objects of other layers).
+    fn collect(
+        it: &designcraft_doc::Item,
+        layers: &[LayerId],
+        inside: bool,
+        out: &mut std::collections::HashSet<designcraft_doc::ItemId>,
+        depth: usize,
+    ) {
+        let on = inside || layers.contains(&it.layer);
+        if on {
+            out.insert(it.id);
+        }
+        if depth < 64 {
+            for c in it.children() {
+                collect(c, layers, on, out, depth + 1);
+            }
+        }
+    }
     let mut on_layer = std::collections::HashSet::new();
     for sp in d.spreads.iter().chain(d.parents.iter()) {
-        for it in sp.items.iter().filter(|i| layers.contains(&i.layer)) {
-            it.walk(&mut |i| {
-                on_layer.insert(i.id);
-            });
+        for it in &sp.items {
+            collect(it, layers, false, &mut on_layer, 0);
         }
     }
     sel.items.retain(|i| !on_layer.contains(i));
@@ -2213,6 +2230,59 @@ mod layer_options_tests {
         caret(&mut s);
         s.execute("layer.others", &json!({"id": other, "lock": true})).unwrap();
         assert!(s.doc().unwrap().selection.text.is_none(), "Lock Others ends the caret on the first layer");
+    }
+
+    /// A group may hold objects of other layers: locking a layer deselects the objects on it by
+    /// their own layer or the group's around them.
+    #[test]
+    fn locking_a_layer_deselects_the_objects_of_a_group_on_it() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let first = s.doc().unwrap().doc.layers[0].id.0;
+        let a = s.execute("frame.create", &json!({"rect": [0, 0, 10, 10]})).unwrap()["id"].as_u64().unwrap();
+        let art = s.execute("layer.new", &json!({"name": "Art"})).unwrap()["id"].as_u64().unwrap();
+        let b = s.execute("frame.create", &json!({"rect": [20, 0, 30, 10]})).unwrap()["id"].as_u64().unwrap();
+        let g = s.execute("object.group", &json!({"ids": [a, b]})).unwrap()["id"].as_u64().unwrap();
+        let layer_of = |s: &crate::Session, id: u64| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().layer.0;
+        let sel = |s: &crate::Session| s.doc().unwrap().selection.items.iter().map(|i| i.0).collect::<Vec<_>>();
+        let unlock = |s: &mut crate::Session| {
+            for l in [first, art] {
+                s.execute("layer.set", &json!({"id": l, "locked": false})).unwrap();
+            }
+        };
+        // The objects keep their own layers inside the group.
+        assert_eq!((layer_of(&s, a), layer_of(&s, b)), (first, art));
+        // Locking an object's own layer deselects it, whatever the group's layer.
+        for (obj, layer) in [(a, first), (b, art)] {
+            unlock(&mut s);
+            s.execute("selection.set", &json!({"ids": [obj], "content": true})).unwrap();
+            s.execute("layer.set", &json!({"id": layer, "locked": true})).unwrap();
+            assert!(sel(&s).is_empty(), "{obj} on its locked layer stays selected");
+        }
+        // Locking the group's layer deselects every object in it, of any layer.
+        let group_layer = layer_of(&s, g);
+        unlock(&mut s);
+        s.execute("selection.set", &json!({"ids": [a, b], "content": true})).unwrap();
+        s.execute("layer.set", &json!({"id": group_layer, "locked": true})).unwrap();
+        assert!(sel(&s).is_empty(), "the group's layer locked: {:?}", sel(&s));
+    }
+
+    /// A click passes over a group's locked object to an unlocked one behind it: the group is not
+    /// hit where only its locked part lies.
+    #[test]
+    fn a_click_passes_over_a_groups_locked_object() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let behind = s.execute("frame.create", &json!({"rect": [0, 0, 100, 100]})).unwrap()["id"].as_u64().unwrap();
+        let locked = s.execute("frame.create", &json!({"rect": [20, 20, 80, 80]})).unwrap()["id"].as_u64().unwrap();
+        let other = s.execute("frame.create", &json!({"rect": [200, 0, 220, 20]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.fill", &json!({"ids": [behind, locked, other], "swatch": "[Black]"})).unwrap();
+        let group = s.execute("object.group", &json!({"ids": [locked, other]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.lock", &json!({"ids": [locked]})).unwrap();
+        let d = &s.doc().unwrap().doc;
+        let p = designcraft_geom::Point::new(50.0, 50.0);
+        assert_eq!(d.hit_item_where(0, p, 1.0, |it| !it.locked).map(|i| i.0), Some(behind), "the unlocked object behind");
+        assert_eq!(d.hit_item(0, p, 1.0).map(|i| i.0), Some(group), "without the filter the group is hit");
     }
 }
 

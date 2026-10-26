@@ -256,7 +256,7 @@ impl ToolContext<'_> {
             // Editing a parent page: its objects pass the same lock checks.
             let s = self.doc.spread(sr)?;
             let open = |it: &designcraft_doc::Item| !it.locked && !it.hidden && !self.doc.layer(it.layer).is_some_and(|l| l.locked || !l.visible);
-            return s.items.iter().rev().find(|it| open(it) && designcraft_doc::edit_hit(it, sp, self.tol(4.0))).map(|it| (sr, it.id));
+            return s.items.iter().rev().find(|it| open(it) && designcraft_doc::edit_hit_where(it, sp, self.tol(4.0), &open)).map(|it| (sr, it.id));
         };
         self.doc.hit_item_where(si, sp, self.tol(4.0), |it| !it.locked).map(|id| (sr, id))
     }
