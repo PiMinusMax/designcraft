@@ -705,6 +705,8 @@ impl CanvasCache {
             separations: separations::Preview::default(),
             sync_ms: 0.0,
             patch_ms: 0.0,
+            pixels: None,
+            pixels_generation: 0,
         }
     }
 }
@@ -742,6 +744,10 @@ pub struct CanvasCache {
     /// [`canvas::SYNC_BUDGET_MS`], edits render on the worker instead of the UI thread.
     pub sync_ms: f64,
     pub patch_ms: f64,
+    /// The pixels the canvas texture shows (full resolution, as uploaded), and a counter that
+    /// changes with them: a text highlight inverts what it covers from these, without rendering.
+    pub pixels: Option<std::sync::Arc<designcraft_render::Rendered>>,
+    pub pixels_generation: u64,
 }
 
 #[derive(Default, Clone, Copy, Debug, Serialize)]
