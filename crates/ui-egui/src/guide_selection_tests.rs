@@ -425,6 +425,8 @@ fn an_injected_button_change_waits_for_a_pass_without_one() {
     let mut next = egui::RawInput::default();
     app.raw_input_hook(&ctx, &mut next);
     assert_eq!(next.events, vec![button(5.0, true)], "and comes in the next pass");
+}
+
 /// A guide pulled out of a ruler keeps the resize cursor across it over the canvas until it is
 /// dropped; the tool's arrow came back as soon as the pointer left the ruler.
 #[test]

@@ -5235,6 +5235,7 @@ mod tests {
             "No logo",
             "A logo area needs High error correction to stay readable.",
             "Round corner patterns read on phones; a few simple readers need square ones.",
+        ]);
         // The Links panel's labels and status texts.
         keys.extend([
             "Changed since it was placed",
