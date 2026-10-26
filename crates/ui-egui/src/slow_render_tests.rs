@@ -71,3 +71,21 @@ fn after_a_slow_patch_the_next_edit_goes_to_the_worker() {
     frame(&mut app, &ctx);
     assert!(!current(&app) && app.canvas.pending.is_some(), "the edit renders on the worker");
 }
+
+/// Every repaint attempt records its time, also one that ends early (here: the edit is off the
+/// canvas, nothing to repaint), so the budget never judges by a stale earlier time.
+#[test]
+fn a_repaint_that_ends_early_records_its_time_too() {
+    let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({})).unwrap();
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx);
+    if app.canvas.worker.is_none() {
+        return;
+    }
+    // At the budget: still allowed to patch; a fresh time replaces it.
+    app.canvas.patch_ms = SYNC_BUDGET_MS;
+    app.run("frame.create", json!({"rect": [20000, 20000, 20010, 20010]})).unwrap();
+    frame(&mut app, &ctx);
+    assert!(app.canvas.patch_ms < SYNC_BUDGET_MS, "{}", app.canvas.patch_ms);
+}

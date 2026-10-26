@@ -1937,6 +1937,12 @@ impl DesignApp {
         let private = !self.control_synthetic.is_empty();
         let events = if private { &mut self.control_synthetic } else { &mut self.synthetic };
         let Some(first) = events.first() else { return };
+        // A button change of the user's (or one held back from the last pass) is in this pass
+        // already: an injected one waits for the next, so no pass sees two (see
+        // `pace_pointer_buttons`). Pending injection keeps the passes coming.
+        if matches!(first, egui::Event::PointerButton { .. }) && raw.events.iter().any(|e| matches!(e, egui::Event::PointerButton { .. })) {
+            return;
+        }
         let n = match first {
             egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => 1,
             _ => events.iter().position(|e| matches!(e, egui::Event::Key { pressed: false, .. })).map_or(events.len(), |i| i + 1),

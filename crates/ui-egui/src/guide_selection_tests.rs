@@ -408,3 +408,21 @@ fn input_is_paced_to_one_button_change_per_frame() {
     app.raw_input_hook(&ctx, &mut later);
     assert_eq!(later.events, vec![button(4.0, false), Event::PointerMoved(p(5.0))]);
 }
+
+/// An injected button change (control channel, scripts) waits a pass when the user's own (or one
+/// held back) is already in this pass: no pass sees two.
+#[test]
+fn an_injected_button_change_waits_for_a_pass_without_one() {
+    let ctx = egui::Context::default();
+    let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+    let button = |x: f32, pressed| Event::PointerButton { pos: pos2(x, 10.0), button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    app.synthetic.push(button(5.0, true));
+    let buttons = |raw: &egui::RawInput| raw.events.iter().filter(|e| matches!(e, Event::PointerButton { .. })).count();
+    let mut raw = egui::RawInput { events: vec![button(1.0, true)], ..Default::default() };
+    app.raw_input_hook(&ctx, &mut raw);
+    assert_eq!(buttons(&raw), 1, "only the user's");
+    assert_eq!(app.synthetic.len(), 1, "the injected one waits");
+    let mut next = egui::RawInput::default();
+    app.raw_input_hook(&ctx, &mut next);
+    assert_eq!(next.events, vec![button(5.0, true)], "and comes in the next pass");
+}

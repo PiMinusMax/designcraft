@@ -1015,8 +1015,14 @@ fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: 
         return false;
     }
     let new = st.doc.clone();
-    let Some(regions) = designcraft_render::damage::damage_with(&old, &new, Some(&app.session.cache)) else { return false };
+    // Timed from the damage check on, whichever way it ends: a slow comparison of a large
+    // document counts against the budget as a slow repaint does (`patch_ms`).
     let t0 = crate::now_ms();
+    let timed = |app: &mut DesignApp, patched: bool| {
+        app.canvas.patch_ms = crate::now_ms() - t0;
+        patched
+    };
+    let Some(regions) = designcraft_render::damage::damage_with(&old, &new, Some(&app.session.cache)) else { return timed(app, false) };
     let k = sh.zoom * ppp;
     let mut px: Option<(i64, i64, i64, i64)> = None;
     for (r, rect) in &regions {
@@ -1036,15 +1042,15 @@ fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: 
     };
     let Some((x0, y0, x1, y1)) = px.map(|p| (p.0.max(0), p.1.max(0), p.2.min(tw), p.3.min(th))) else {
         done(app);
-        return true;
+        return timed(app, true);
     };
     if x1 <= x0 || y1 <= y0 {
         done(app);
-        return true;
+        return timed(app, true);
     }
     // Big changes: a full render costs about the same.
     if ((x1 - x0) * (y1 - y0)) as f64 > 0.5 * (tw * th) as f64 {
-        return false;
+        return timed(app, false);
     }
     let placed: Vec<designcraft_render::Placed> = layout.slots.iter().map(|s| designcraft_render::Placed { spread: s.spread, xf: s.xf }).collect();
     let view = Affine::translate((-(x0 as f64), -(y0 as f64)))
@@ -1060,8 +1066,7 @@ fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: 
     done(app);
     app.canvas.patches += 1;
     app.perf.render_ms = crate::now_ms() - t0;
-    app.canvas.patch_ms = app.perf.render_ms;
-    true
+    timed(app, true)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
